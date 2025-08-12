@@ -20,6 +20,7 @@
 #include <cloud/blockstore/libs/storage/init/common/actorsystem.h>
 #include <cloud/blockstore/libs/storage/partition/part_actor.h>
 #include <cloud/blockstore/libs/storage/partition2/part2_actor.h>
+#include <cloud/blockstore/libs/storage/partition_direct/partition_direct_actor.h>
 #include <cloud/blockstore/libs/storage/service/service.h>
 #include <cloud/blockstore/libs/storage/stats_service/stats_service.h>
 #include <cloud/blockstore/libs/storage/ss_proxy/ss_proxy.h>
@@ -94,6 +95,8 @@ struct TCustomTabletListRenderer final
                     return NPartition2::TPartitionActor::GetStateName(state);
                 case TTabletTypes::BlockStoreDiskRegistry:
                     return TDiskRegistryActor::GetStateName(state);
+                case TTabletTypes::BlockStorePartitionDirect:
+                    return NPartitionDirect::TPartitionActor::GetStateName(state);
                 default:
                     break;
             }

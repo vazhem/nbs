@@ -56,6 +56,7 @@ PEERDIR(
     cloud/blockstore/libs/storage/core
     cloud/blockstore/libs/storage/partition
     cloud/blockstore/libs/storage/partition2
+    cloud/blockstore/libs/storage/partition_direct
     cloud/blockstore/libs/storage/partition_nonrepl
     cloud/blockstore/libs/storage/protos
     cloud/blockstore/libs/storage/protos_ydb

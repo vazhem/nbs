@@ -318,7 +318,8 @@ public:
         const NProto::EStorageMediaKind mediaKind)
     {
         switch (mediaKind) {
-            case NCloud::NProto::STORAGE_MEDIA_SSD: {
+            case NCloud::NProto::STORAGE_MEDIA_SSD:
+            case NCloud::NProto::STORAGE_MEDIA_SSD_DIRECT: {
                 return isSystem ? SsdSystem : Ssd;
             }
             case NCloud::NProto::STORAGE_MEDIA_SSD_NONREPLICATED: return SsdNonrepl;

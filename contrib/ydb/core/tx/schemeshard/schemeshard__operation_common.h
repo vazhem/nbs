@@ -968,7 +968,7 @@ public:
         TTxState* txState = context.SS->FindTx(OperationId);
         Y_ABORT_UNLESS(txState);
         Y_ABORT_UNLESS(txState->TxType == TTxState::TxCreatePQGroup || txState->TxType == TTxState::TxAlterPQGroup || txState->TxType == TTxState::TxAllocatePQ);
- 
+
         TPathId pathId = txState->TargetPathId;
         TPathElement::TPtr path = context.SS->PathsById.at(pathId);
 
@@ -1119,7 +1119,8 @@ public:
 
         for (auto shard : txState->Shards) {
             if (shard.TabletType == ETabletType::BlockStorePartition ||
-                shard.TabletType == ETabletType::BlockStorePartition2) {
+                shard.TabletType == ETabletType::BlockStorePartition2 ||
+                shard.TabletType == ETabletType::BlockStorePartitionDirect) {
                 continue;
             }
 

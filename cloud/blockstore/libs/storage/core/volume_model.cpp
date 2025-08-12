@@ -26,6 +26,7 @@ namespace {
     {                                                                          \
         switch (mediaKind) {                                                   \
             case NCloud::NProto::STORAGE_MEDIA_SSD:                            \
+            case NCloud::NProto::STORAGE_MEDIA_SSD_DIRECT:                     \
                 return config.GetSSD ## paramName();                           \
             case NCloud::NProto::STORAGE_MEDIA_SSD_NONREPLICATED:              \
                 return config.GetNonReplicatedSSD ## paramName();              \
@@ -117,6 +118,7 @@ bool GetThrottlingEnabled(
         case NCloud::NProto::EStorageMediaKind::STORAGE_MEDIA_HDD_LOCAL:
             return false;
         case NCloud::NProto::EStorageMediaKind::STORAGE_MEDIA_SSD:
+        case NCloud::NProto::EStorageMediaKind::STORAGE_MEDIA_SSD_DIRECT:
             return config.GetThrottlingEnabledSSD();
 
         case NCloud::NProto::EStorageMediaKind::STORAGE_MEDIA_SSD_NONREPLICATED:
@@ -136,6 +138,7 @@ auto GetThrottlingBoostUnits(
 {
     switch (volumeParams.MediaKind) {
         case NCloud::NProto::EStorageMediaKind::STORAGE_MEDIA_SSD:
+        case NCloud::NProto::EStorageMediaKind::STORAGE_MEDIA_SSD_DIRECT:
             return config.GetThrottlingSSDBoostUnits();
 
         case NCloud::NProto::EStorageMediaKind::STORAGE_MEDIA_SSD_LOCAL:
@@ -232,7 +235,8 @@ TPoolKinds GetPoolKinds(
             };
         }
 
-        case NCloud::NProto::STORAGE_MEDIA_SSD: {
+        case NCloud::NProto::STORAGE_MEDIA_SSD:
+        case NCloud::NProto::STORAGE_MEDIA_SSD_DIRECT: {
             auto systemChannelPoolKind =
                 config.GetSSDSystemChannelPoolKindFeatureValue(
                     cloudId, folderId, diskId);

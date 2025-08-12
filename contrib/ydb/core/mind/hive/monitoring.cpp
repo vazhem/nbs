@@ -1296,6 +1296,7 @@ public:
             return "BV";
         case TTabletTypes::BlockStorePartition:
         case TTabletTypes::BlockStorePartition2:
+        case TTabletTypes::BlockStorePartitionDirect:
             return "BP";
         case TTabletTypes::Kesus:
             return "K";

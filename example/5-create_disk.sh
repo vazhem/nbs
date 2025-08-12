@@ -12,7 +12,7 @@ show_help() {
 Usage: ./5-create_disk.sh [-hkd]
 Creates disk with requested kind and attach it to device
 -h, --help                     Display help
--k, --kind                     Kind of disk ssd|hdd|nonreplicated|mirror2|mirror3|local (default: ssd)
+-k, --kind                     Kind of disk ssd|ssd_direct|hdd|nonreplicated|mirror2|mirror3|local (default: ssd)
 -d, --disk-id                  disk-id
 -b, --base-disk-id             the base disk if you want to create an overlay disk. Should use together with the base-disk-checkpoint-id
 -c, --base-disk-checkpoint-id  the checkpoint-id if you want to create an overlay disk. Should use together with the base-disk-id
@@ -71,6 +71,8 @@ done
 case $kind in
 "ssd")
     default_id="vol0"; blocks_count=262144;;
+"ssd_direct")
+    default_id="vdd0"; blocks_count=262144;;
 "hdd")
     default_id="hdd0"; blocks_count=262144;;
 "nonreplicated")

@@ -6,6 +6,7 @@
 #include <cloud/blockstore/libs/storage/bootstrapper/bootstrapper.h>
 #include <cloud/blockstore/libs/storage/partition/part.h>
 #include <cloud/blockstore/libs/storage/partition2/part2.h>
+#include <cloud/blockstore/libs/storage/partition_direct/partition_direct.h>
 #include <cloud/blockstore/libs/storage/partition_nonrepl/config.h>
 #include <cloud/blockstore/libs/storage/partition_nonrepl/part_mirror.h>
 #include <cloud/blockstore/libs/storage/partition_nonrepl/part_mirror_resync.h>
@@ -641,7 +642,8 @@ void TVolumeActor::HandleBootExternalResponse(
         partTabletId);
 
     if (msg->StorageInfo->TabletType != TTabletTypes::BlockStorePartition &&
-        msg->StorageInfo->TabletType != TTabletTypes::BlockStorePartition2) {
+        msg->StorageInfo->TabletType != TTabletTypes::BlockStorePartition2 &&
+        msg->StorageInfo->TabletType != TTabletTypes::BlockStorePartitionDirect) {
         // Partitions use specific tablet factory
         LOG_ERROR(
             ctx,
@@ -695,10 +697,26 @@ void TVolumeActor::HandleBootExternalResponse(
     {
         Y_ABORT_UNLESS(
             storage->TabletType == TTabletTypes::BlockStorePartition ||
-            storage->TabletType == TTabletTypes::BlockStorePartition2);
+            storage->TabletType == TTabletTypes::BlockStorePartition2 ||
+            storage->TabletType == TTabletTypes::BlockStorePartitionDirect);
 
         if (storage->TabletType == TTabletTypes::BlockStorePartition) {
-            return NPartition::CreatePartitionTablet(
+        return NPartition::CreatePartitionTablet(
+                    owner,
+                    storage,
+                    std::move(config),
+                    std::move(diagnosticsConfig),
+                    std::move(profileLog),
+                    std::move(blockDigestGenerator),
+                    std::move(partitionConfig),
+                    storageAccessMode,
+                    partitionIndex,
+                    siblingCount,
+                    selfId,
+                    volumeTabletId)
+            .release();
+        } else if (storage->TabletType == TTabletTypes::BlockStorePartitionDirect) {
+                return NPartitionDirect::CreatePartitionTablet(
                        owner,
                        storage,
                        std::move(config),
@@ -707,7 +725,6 @@ void TVolumeActor::HandleBootExternalResponse(
                        std::move(blockDigestGenerator),
                        std::move(partitionConfig),
                        storageAccessMode,
-                       partitionIndex,
                        siblingCount,
                        selfId,
                        volumeTabletId)

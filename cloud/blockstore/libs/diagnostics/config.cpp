@@ -217,6 +217,9 @@ TDuration GetDowntimeThreshold(
         case NCloud::NProto::STORAGE_MEDIA_SSD: {
             return config.GetSSDDowntimeThreshold();
         }
+        case NCloud::NProto::STORAGE_MEDIA_SSD_DIRECT: {
+            return config.GetSSDDowntimeThreshold();
+        }
         case NCloud::NProto::STORAGE_MEDIA_SSD_NONREPLICATED: {
             return config.GetNonreplicatedSSDDowntimeThreshold();
         }

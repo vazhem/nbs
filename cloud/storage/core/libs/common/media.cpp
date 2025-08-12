@@ -131,6 +131,8 @@ bool ParseMediaKind(const TStringBuf s, NProto::EStorageMediaKind* mediaKind)
         *mediaKind = NProto::STORAGE_MEDIA_HDD_LOCAL;
     } else if (s == "hdd_nonrepl") {
         *mediaKind = NProto::STORAGE_MEDIA_HDD_NONREPLICATED;
+    } else if (s == "ssd_direct") {
+        *mediaKind = NProto::STORAGE_MEDIA_SSD_DIRECT;
     } else {
         return false;
     }

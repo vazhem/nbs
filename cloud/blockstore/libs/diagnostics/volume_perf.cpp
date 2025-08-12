@@ -44,6 +44,9 @@ TVolumePerfSettings TVolumePerformanceCalculator::GetConfigSettings(
         case NCloud::NProto::STORAGE_MEDIA_SSD: {
             return diagnosticsConfig->GetSsdPerfSettings();
         }
+        case NCloud::NProto::STORAGE_MEDIA_SSD_DIRECT: {
+            return diagnosticsConfig->GetSsdPerfSettings();
+        }
         default: {
             return diagnosticsConfig->GetHddPerfSettings();
         }

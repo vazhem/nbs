@@ -287,6 +287,7 @@ bool GetThrottlingEnabled(
 
     switch (partitionConfig.GetStorageMediaKind()) {
         case NCloud::NProto::EStorageMediaKind::STORAGE_MEDIA_SSD:
+        case NCloud::NProto::EStorageMediaKind::STORAGE_MEDIA_SSD_DIRECT:
             return config.GetThrottlingEnabledSSD();
 
         default:

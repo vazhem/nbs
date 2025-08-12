@@ -100,7 +100,8 @@ public:
                 break;
             }
 
-            case NCloud::NProto::STORAGE_MEDIA_SSD: {
+            case NCloud::NProto::STORAGE_MEDIA_SSD:
+            case NCloud::NProto::STORAGE_MEDIA_SSD_DIRECT: {
                 mediaKindProfile = &Profile.GetSSDProfile();
                 break;
             }

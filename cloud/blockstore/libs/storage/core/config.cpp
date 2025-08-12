@@ -1059,6 +1059,10 @@ ui64 GetAllocationUnit(
             unit = config.GetAllocationUnitSSD() * 1_GB;
             break;
 
+        case STORAGE_MEDIA_SSD_DIRECT:
+            unit = config.GetAllocationUnitSSD() * 1_GB;
+            break;
+
         case STORAGE_MEDIA_SSD_NONREPLICATED:
             unit = config.GetAllocationUnitNonReplicatedSSD() * 1_GB;
             break;
