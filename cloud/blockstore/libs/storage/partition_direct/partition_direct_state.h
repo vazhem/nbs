@@ -11,6 +11,7 @@
 
 #include "partition_direct_storage.h"
 #include "partition_direct_storage_mem.h"
+#include "partition_direct_storage_proxy.h"
 #include "public.h"
 
 namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
@@ -23,6 +24,8 @@ private:
     const NProto::TPartitionConfig& Config;
     NKikimr::TTabletStorageInfoPtr StorageInfo;
     TPartitionStoragePtr Storage;
+
+    EStorageType storageType = EStorageType::Memory;
 
 public:
     explicit TPartitionState(
@@ -38,8 +41,14 @@ public:
         ui64 initialCommitId)
         : Config(partitionConfig)
         , StorageInfo(std::move(storage))
-        , Storage(std::make_shared<TInMemoryStorage>(Config.GetBlockSize()))
     {
+        if (storageType == EStorageType::Memory) {
+            Storage = std::make_shared<TInMemoryStorage>(Config.GetBlockSize());
+        } else {
+            Storage = std::make_shared<TProxyStorage>(
+                Config.GetBlockSize());
+        }
+
         Y_UNUSED(config);
         Y_UNUSED(diagnosticsConfig);
         Y_UNUSED(profileLog);
@@ -81,16 +90,19 @@ public:
     }
 
     NProto::TError ReadBlocks(
+        const NActors::TActorContext& ctx,
         ui64 startIndex,
         ui32 blocksCount,
         const TBlockDataRef& buffer);
 
     NProto::TError WriteBlocks(
+        const NActors::TActorContext& ctx,
         ui64 startIndex,
         ui32 blocksCount,
         const TBlockDataRef& buffer);
 
     NProto::TError ZeroBlocks(
+        const NActors::TActorContext& ctx,
         ui64 startIndex,
         ui32 blocksCount);
 

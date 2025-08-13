@@ -114,6 +114,7 @@ void TPartitionActor::HandleReadBlocksLocalRequest(
 
     auto response = std::make_unique<TEvService::TEvReadBlocksLocalResponse>();
     auto error = State->ReadBlocks(
+        ctx,
         record.GetStartIndex(),
         record.blockscount(),
         {const_cast<char*>(guard.Get()[0].Data()),
@@ -146,6 +147,7 @@ void TPartitionActor::HandleWriteBlocksLocalRequest(
 
     auto response = std::make_unique<TEvService::TEvWriteBlocksLocalResponse>();
     auto error = State->WriteBlocks(
+        ctx,
         record.GetStartIndex(),
         record.BlocksCount,
         {const_cast<char*>(guard.Get()[0].Data()),

@@ -10,6 +10,7 @@ using namespace NCloud::NStorage;
 ////////////////////////////////////////////////////////////////////////////////
 
 NProto::TError TPartitionState::ReadBlocks(
+    const NActors::TActorContext& ctx,
     ui64 startIndex,
     ui32 blockCount,
     const TBlockDataRef& buffer)
@@ -28,11 +29,12 @@ NProto::TError TPartitionState::ReadBlocks(
     }});
 
     return Storage->ReadBlocksLocal(
-        MakeIntrusive<TCallContext>(),
+        ctx,
         std::move(request));
 }
 
 NProto::TError TPartitionState::WriteBlocks(
+    const NActors::TActorContext& ctx,
     ui64 startIndex,
     ui32 blockCount,
     const TBlockDataRef& buffer)
@@ -51,11 +53,12 @@ NProto::TError TPartitionState::WriteBlocks(
     }});
 
     return Storage->WriteBlocksLocal(
-        MakeIntrusive<TCallContext>(),
+        ctx,
         std::move(request));
 }
 
 NProto::TError TPartitionState::ZeroBlocks(
+    const NActors::TActorContext& ctx,
     ui64 startIndex,
     ui32 blockCount)
 {
@@ -68,7 +71,7 @@ NProto::TError TPartitionState::ZeroBlocks(
     request->SetBlocksCount(blockCount);
 
     return Storage->ZeroBlocks(
-        MakeIntrusive<TCallContext>(),
+        ctx,
         std::move(request));
 }
 

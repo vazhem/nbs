@@ -6,21 +6,26 @@ namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+enum class EStorageType {
+    Memory,
+    Proxy
+};
+
 class TPartitionStorage
 {
 public:
     virtual ~TPartitionStorage() = default;
 
     virtual NProto::TError ReadBlocksLocal(
-        TCallContextPtr callContext,
+        const NActors::TActorContext& ctx,
         std::shared_ptr<NProto::TReadBlocksLocalRequest> request) = 0;
 
     virtual NProto::TError WriteBlocksLocal(
-        TCallContextPtr callContext,
+        const NActors::TActorContext& ctx,
         std::shared_ptr<NProto::TWriteBlocksLocalRequest> request) = 0;
 
     virtual NProto::TError ZeroBlocks(
-        TCallContextPtr callContext,
+        const NActors::TActorContext& ctx,
         std::shared_ptr<NProto::TZeroBlocksRequest> request) = 0;
 };
 

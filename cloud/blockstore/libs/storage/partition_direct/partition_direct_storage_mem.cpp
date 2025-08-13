@@ -7,10 +7,10 @@ namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 ////////////////////////////////////////////////////////////////////////////////
 
 NProto::TError TInMemoryStorage::ReadBlocksLocal(
-    TCallContextPtr callContext,
+    const NActors::TActorContext& ctx,
     std::shared_ptr<NProto::TReadBlocksLocalRequest> request)
 {
-    Y_UNUSED(callContext);
+    Y_UNUSED(ctx);
 
     const ui64 startIndex = request->GetStartIndex();
     const ui32 blockCount = request->GetBlocksCount();
@@ -30,21 +30,21 @@ NProto::TError TInMemoryStorage::ReadBlocksLocal(
         ui64 blockIndex = startIndex + i;
         auto it = Blocks.find(blockIndex);
         if (it != Blocks.end()) {
-            memcpy(dst, it->second.data(), BlockSize);
+            memcpy(dst, it->second.data(), request->BlockSize);
         } else {
-            memset(dst, 0, BlockSize);
+            memset(dst, 0, request->BlockSize);
         }
-        dst += BlockSize;
+        dst += request->BlockSize;
     }
 
     return MakeError(S_OK);
 }
 
 NProto::TError TInMemoryStorage::WriteBlocksLocal(
-    TCallContextPtr callContext,
+    const NActors::TActorContext& ctx,
     std::shared_ptr<NProto::TWriteBlocksLocalRequest> request)
 {
-    Y_UNUSED(callContext);
+    Y_UNUSED(ctx);
 
     const ui64 startIndex = request->GetStartIndex();
     const ui32 blockCount = request->BlocksCount;
@@ -62,19 +62,19 @@ NProto::TError TInMemoryStorage::WriteBlocksLocal(
     const char* src = guard.Get()[0].Data();
     for (ui32 i = 0; i < blockCount; ++i) {
         ui64 blockIndex = startIndex + i;
-        TString blockData(src, BlockSize);
+        TString blockData(src, request->BlockSize);
         Blocks[blockIndex] = std::move(blockData);
-        src += BlockSize;
+        src += request->BlockSize;
     }
 
     return MakeError(S_OK);
 }
 
 NProto::TError TInMemoryStorage::ZeroBlocks(
-    TCallContextPtr callContext,
+    const NActors::TActorContext& ctx,
     std::shared_ptr<NProto::TZeroBlocksRequest> request)
 {
-    Y_UNUSED(callContext);
+    Y_UNUSED(ctx);
 
     const ui64 startIndex = request->GetStartIndex();
     const ui32 blockCount = request->GetBlocksCount();
