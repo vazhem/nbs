@@ -1,6 +1,7 @@
 #include "node_warden_impl.h"
 
 #include <contrib/ydb/core/blobstorage/crypto/default.h>
+#include <contrib/ydb/core/blobstorage/ddisk/ddisk_actor.h>
 
 #include <util/string/split.h>
 
@@ -184,7 +185,18 @@ namespace NKikimr::NStorage {
 
         // create an actor
         auto *as = TActivationContext::ActorSystem();
-        as->RegisterLocalService(vdiskServiceId, as->Register(CreateVDisk(vdiskConfig, groupInfo, AppData()->Counters),
+        // register ddisk actor instead of vdisk actor for mirror3direct erasure groups
+        IActor* actor;
+        if (groupInfo->Type.GetErasure() == TBlobStorageGroupType::ErasureMirror3Direct) {
+            actor = CreateDDisk(vdiskConfig, groupInfo, AppData()->Counters);
+            LOG_DEBUG_S(*TlsActivationContext, NKikimrServices::BS_CONTROLLER,
+            "StartLocalVDiskActor: created DDisk actor");
+        } else {
+            actor = CreateVDisk(vdiskConfig, groupInfo, AppData()->Counters);
+            LOG_DEBUG_S(*TlsActivationContext, NKikimrServices::BS_CONTROLLER,
+            "StartLocalVDiskActor: created VDisk actor");
+        }
+        as->RegisterLocalService(vdiskServiceId, as->Register(actor,
             TMailboxType::Revolving, AppData()->SystemPoolId));
 
         STLOG(PRI_DEBUG, BS_NODE, NW24, "StartLocalVDiskActor done", (VDiskId, vdisk.GetVDiskId()), (VSlotId, vslotId),

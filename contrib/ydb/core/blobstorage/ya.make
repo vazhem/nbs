@@ -9,6 +9,7 @@ PEERDIR(
     contrib/ydb/core/blobstorage/backpressure
     contrib/ydb/core/blobstorage/base
     contrib/ydb/core/blobstorage/crypto
+    contrib/ydb/core/blobstorage/ddisk
     contrib/ydb/core/blobstorage/dsproxy
     contrib/ydb/core/blobstorage/groupinfo
     contrib/ydb/core/blobstorage/incrhuge
@@ -32,6 +33,7 @@ RECURSE(
     backpressure
     base
     crypto
+    ddisk
     dsproxy
     groupinfo
     incrhuge
