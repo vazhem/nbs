@@ -220,3 +220,11 @@ message TCheckpointMeta
     TPartitionStats Stats = 5;
     uint64 DateDeleted = 6;
 }
+
+////////////////////////////////////////////////////////////////////////////////
+
+message TPartitionDirectMeta
+{
+    // ID of the virtual group mirror-3-direct
+    uint32 VirtualGroupId = 1;
+}

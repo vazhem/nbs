@@ -26,6 +26,7 @@ private:
     TPartitionStoragePtr Storage;
 
     EStorageType storageType = EStorageType::Memory;
+    ui32 VirtualGroupId = 0;  // ID of the virtual group with mirror-3-direct erasure
 
 public:
     explicit TPartitionState(
@@ -112,6 +113,16 @@ public:
     bool CheckBlockRange(const TBlockRange64& range) const
     {
         return range.Start < GetBlockCount() && range.End < GetBlockCount();
+    }
+
+    ui32 GetVirtualGroupId() const
+    {
+        return VirtualGroupId;
+    }
+
+    void SetVirtualGroupId(ui32 groupId)
+    {
+        VirtualGroupId = groupId;
     }
 };
 

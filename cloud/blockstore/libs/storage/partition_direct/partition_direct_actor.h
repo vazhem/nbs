@@ -9,9 +9,12 @@
 #include <contrib/ydb/library/actors/core/actor.h>
 #include <contrib/ydb/library/actors/core/events.h>
 #include <contrib/ydb/core/base/tablet.h>
+#include <contrib/ydb/core/blobstorage/base/blobstorage_events.h>
 
 #include "public.h"
 #include "partition_direct_state.h"
+#include "partition_direct_database.h"
+#include "partition_direct_tx.h"
 
 namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 
@@ -23,6 +26,21 @@ class TPartitionActor final
     : public NActors::TActor<TPartitionActor>
     , public TTabletBase<TPartitionActor>
 {
+public:
+    static constexpr auto LogComponent = TBlockStoreComponents::PARTITION;
+
+    // Transaction counters (minimal implementation)
+    struct TTransactionCounters
+    {
+        enum ETransactionType
+        {
+            TX_InitSchema,
+            TX_LoadState,
+            TX_SaveVirtualGroupId
+        };
+    };
+    using TCounters = TTransactionCounters;
+
 private:
     const TStorageConfigPtr Config;
     const NProto::TPartitionConfig PartitionConfig;
@@ -49,6 +67,7 @@ private:
     void Enqueue(STFUNC_SIG) override;
     void DefaultSignalTabletActive(const NActors::TActorContext& ctx) override;
     void OnActivateExecutor(const NActors::TActorContext& ctx) override;
+    void DoActivateExecutor(const NActors::TActorContext& ctx);
     void OnDetach(const NActors::TActorContext& ctx) override;
     void OnTabletDead(
         NKikimr::TEvTablet::TEvTabletDead::TPtr& ev,
@@ -68,6 +87,12 @@ private:
     void HandleWriteBlocksLocalRequest(
         const TEvService::TEvWriteBlocksLocalRequest::TPtr& ev,
         const NActors::TActorContext& ctx);
+
+    void HandleControllerConfigResponse(
+        const TEvBlobStorage::TEvControllerConfigResponse::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    BLOCKSTORE_PARTITION_DIRECT_TRANSACTIONS(BLOCKSTORE_IMPLEMENT_TRANSACTION, TTxPartitionDirect)
 };
 
 } // namespace NCloud::NBlockStore::NStorage::NPartitionDirect
