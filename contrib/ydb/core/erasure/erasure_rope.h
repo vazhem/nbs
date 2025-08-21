@@ -440,8 +440,9 @@ struct TRopeErasureType {
         Erasure2Plus2Stripe = 17, // Not implemented in TRope version of erasure
 
         ErasureMirror3of4 = 18,
+        ErasureMirror3Direct = 19,
 
-        ErasureSpeciesCount = 19
+        ErasureSpeciesCount = 20
     };
 
     static const char *ErasureSpeciesToStr(EErasureSpecies es);
@@ -523,4 +524,3 @@ bool CheckCrcAtTheEnd(TRopeErasureType::ECrcMode crcMode, const TRope& buf);
 
 } // NKikimr
 } // NErasureRope
-
