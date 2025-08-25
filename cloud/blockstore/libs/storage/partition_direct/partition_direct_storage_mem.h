@@ -2,6 +2,8 @@
 
 #include <cloud/blockstore/libs/storage/core/public.h>
 #include <cloud/blockstore/libs/storage/core/request_info.h>
+#include <cloud/blockstore/libs/service/request.h>
+#include <cloud/storage/core/libs/common/error.h>
 
 #include <util/generic/hash.h>
 
@@ -23,16 +25,19 @@ public:
         : BlockSize(blockSize)
     {}
 
-    NProto::TError ReadBlocksLocal(
+    NCloud::NProto::TError ReadBlocksLocal(
         const NActors::TActorContext& ctx,
+        TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TReadBlocksLocalRequest> request) override;
 
-    NProto::TError WriteBlocksLocal(
+    NCloud::NProto::TError WriteBlocksLocal(
         const NActors::TActorContext& ctx,
+        TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TWriteBlocksLocalRequest> request) override;
 
-    NProto::TError ZeroBlocks(
+    NCloud::NProto::TError ZeroBlocks(
         const NActors::TActorContext& ctx,
+        TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TZeroBlocksRequest> request) override;
 };
 

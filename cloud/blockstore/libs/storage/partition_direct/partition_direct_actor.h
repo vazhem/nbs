@@ -9,6 +9,7 @@
 #include <contrib/ydb/library/actors/core/actor.h>
 #include <contrib/ydb/library/actors/core/events.h>
 #include <contrib/ydb/core/base/tablet.h>
+#include <contrib/ydb/core/base/tablet_pipecache.h>
 #include <contrib/ydb/core/blobstorage/base/blobstorage_events.h>
 
 #include "public.h"
@@ -36,7 +37,8 @@ public:
         {
             TX_InitSchema,
             TX_LoadState,
-            TX_SaveVirtualGroupId
+            TX_SaveVirtualGroupId,
+            TX_SaveGroupInfo
         };
     };
     using TCounters = TTransactionCounters;
@@ -91,6 +93,37 @@ private:
     void HandleControllerConfigResponse(
         const TEvBlobStorage::TEvControllerConfigResponse::TPtr& ev,
         const NActors::TActorContext& ctx);
+
+    void HandleCreateStoragePoolResponse(
+        const TEvBlobStorage::TEvControllerConfigResponse::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    void HandleQueryBaseConfigResponse(
+        const TEvBlobStorage::TEvControllerConfigResponse::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    bool ProcessGroupConfiguration(
+        const NKikimrBlobStorage::TBaseConfig& baseConfig,
+        const NActors::TActorContext& ctx);
+
+    // YDB DDisk response handlers
+    void HandleDDiskReadResponse(
+        const NKikimr::TEvBlobStorage::TEvDDiskReadResponse::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    void HandleDDiskWriteResponse(
+        const NKikimr::TEvBlobStorage::TEvDDiskWriteResponse::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    // PipeCache event handlers
+    void HandleDeliveryProblem(
+        const TEvPipeCache::TEvDeliveryProblem::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    // Storage pool management methods
+    void CheckAndCreateVirtualGroup(const NActors::TActorContext& ctx);
+    void RequestStoragePoolGroups(const NActors::TActorContext& ctx);
+    TString GetStoragePoolName();
 
     BLOCKSTORE_PARTITION_DIRECT_TRANSACTIONS(BLOCKSTORE_IMPLEMENT_TRANSACTION, TTxPartitionDirect)
 };

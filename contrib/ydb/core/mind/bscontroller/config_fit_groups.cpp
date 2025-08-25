@@ -142,6 +142,15 @@ namespace NKikimr {
 
                 // create VSlots
                 CreateVSlotsForGroup(groupInfo, group, {});
+
+                // Log the created group ID
+                STLOG(PRI_INFO, BS_CONTROLLER, BSCFG01, "Created new group",
+                    (GroupId, groupId),
+                    (StoragePoolId, StoragePoolId),
+                    (ErasureSpecies, StoragePool.ErasureSpecies),
+                    (NumFailRealms, Geometry.GetNumFailRealms()),
+                    (NumFailDomainsPerFailRealm, Geometry.GetNumFailDomainsPerFailRealm()),
+                    (NumVDisksPerFailDomain, Geometry.GetNumVDisksPerFailDomain()));
             }
 
             void CheckExistingGroup(TGroupId groupId) {
@@ -429,7 +438,7 @@ namespace NKikimr {
                 State.CheckConsistency();
             }
 
-        private:            
+        private:
             template<typename T>
             std::invoke_result_t<T, TGroupGeometryInfo&, TGroupMapper&, TGroupId, TGroupMapper::TGroupDefinition&, TGroupMapper::TGroupConstraintsDefinition&,
                     const THashMap<TVDiskIdShort, TPDiskId>&, TGroupMapper::TForbiddenPDisks, i64> AllocateOrSanitizeGroup(
@@ -670,6 +679,14 @@ namespace NKikimr {
                         for (; numActualGroups < storagePool.NumGroups; ++numActualGroups) {
                             fitter.CreateGroup();
                         }
+
+                        // Log the total number of groups created for this storage pool
+                        STLOG(PRI_INFO, BS_CONTROLLER, BSCFG01, "Created groups for storage pool",
+                            (StoragePoolId, storagePoolId),
+                            (StoragePoolName, storagePool.Name),
+                            (NumGroupsCreated, storagePool.NumGroups - numActualGroups + (storagePool.NumGroups - numActualGroups)),
+                            (TotalGroups, storagePool.NumGroups),
+                            (ErasureSpecies, storagePool.ErasureSpecies));
                     }
                 } catch (const TExFitGroupError& ex) {
                     throw TExError() << "Group fit error"
@@ -719,6 +736,18 @@ namespace NKikimr {
                     fitter.CheckReserve(numGroups, GroupReserveMin, GroupReservePart);
                 }
             }
+
+            // Log the response content for storage pool creation
+            TStringBuilder groupIds;
+            if (status.GroupIdSize() > 0) {
+                for (size_t j = 0; j < status.GroupIdSize(); ++j) {
+                    groupIds << (j > 0 ? ", " : "") << status.GetGroupId(j);
+                }
+            }
+            STLOG(PRI_INFO, BS_CONTROLLER, BSCFG01, "Storage pool creation response status",
+                (Success, status.GetSuccess()),
+                (ErrorDescription, status.GetErrorDescription()),
+                (GroupIds, groupIds));
 
             state.CheckConsistency();
         }

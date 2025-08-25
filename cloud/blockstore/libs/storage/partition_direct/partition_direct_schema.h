@@ -37,8 +37,70 @@ struct TPartitionDirectSchema
         using StoragePolicy = TStoragePolicy<0>;  // System channel
     };
 
+    struct VirtualGroup
+        : public TTableSchema<2>
+    {
+        struct Id
+            : public Column<1, NKikimr::NScheme::NTypeIds::Uint32>
+        {
+        };
+
+        struct GroupId
+            : public Column<2, NKikimr::NScheme::NTypeIds::Uint32>
+        {
+        };
+
+        using TKey = TableKey<Id>;
+        using TColumns = TableColumns<
+            Id,
+            GroupId>;
+
+        using StoragePolicy = TStoragePolicy<0>;  // System channel
+    };
+
+    struct DDiskInfo
+        : public TTableSchema<3>
+    {
+        struct Id
+            : public Column<1, NKikimr::NScheme::NTypeIds::Uint32>
+        {
+        };
+
+        struct NodeId
+            : public Column<2, NKikimr::NScheme::NTypeIds::Uint32>
+        {
+        };
+
+        struct PDiskId
+            : public Column<3, NKikimr::NScheme::NTypeIds::Uint32>
+        {
+        };
+
+        struct VSlotId
+            : public Column<4, NKikimr::NScheme::NTypeIds::Uint32>
+        {
+        };
+
+        struct OrderInGroup
+            : public Column<5, NKikimr::NScheme::NTypeIds::Uint32>
+        {
+        };
+
+        using TKey = TableKey<Id>;
+        using TColumns = TableColumns<
+            Id,
+            NodeId,
+            PDiskId,
+            VSlotId,
+            OrderInGroup>;
+
+        using StoragePolicy = TStoragePolicy<0>;  // System channel
+    };
+
     using TTables = SchemaTables<
-        Meta
+        Meta,
+        VirtualGroup,
+        DDiskInfo
     >;
 
     using TSettings = SchemaSettings<

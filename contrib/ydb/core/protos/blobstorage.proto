@@ -1351,3 +1351,30 @@ message TEvNodeWardenGroupInfo {
     optional TGroupInfo Group = 1;
     repeated uint32 StartedGroupIds = 2;
 }
+
+// DDisk direct operation messages (offset/size based)
+message TEvDDiskReadRequest {
+    optional uint64 Offset = 1;
+    optional uint32 Size = 2;
+}
+
+message TEvDDiskWriteRequest {
+    optional uint64 Offset = 1;
+    optional uint32 Size = 2;
+    optional bytes Data = 3;
+}
+
+message TEvDDiskReadResponse {
+    optional NKikimrProto.EReplyStatus Status = 1;
+    optional string ErrorReason = 2;
+    optional uint64 Offset = 3;
+    optional uint32 Size = 4;
+    optional bytes Data = 5;
+}
+
+message TEvDDiskWriteResponse {
+    optional NKikimrProto.EReplyStatus Status = 1;
+    optional string ErrorReason = 2;
+    optional uint64 Offset = 3;
+    optional uint32 Size = 4;
+}

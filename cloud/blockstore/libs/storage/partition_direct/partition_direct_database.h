@@ -34,6 +34,21 @@ public:
 
     void WriteVirtualGroupId(ui32 groupId);
     bool ReadVirtualGroupId(ui32& groupId);
+
+    //
+    // DDisk Information
+    //
+
+    struct TDDiskInfo {
+        ui32 NodeId;
+        ui32 PDiskId;
+        ui32 VSlotId;
+        ui32 OrderInGroup;
+    };
+
+    void WriteDDiskInfos(const TVector<TDDiskInfo>& ddiskInfos);
+    bool ReadDDiskInfos(TVector<TDDiskInfo>& ddiskInfos);
+    void ClearDDiskInfos();
 };
 
 }   // namespace NCloud::NBlockStore::NStorage::NPartitionDirect
