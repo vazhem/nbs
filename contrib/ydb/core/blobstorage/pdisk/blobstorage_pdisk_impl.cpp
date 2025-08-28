@@ -1390,6 +1390,9 @@ void TPDisk::ChunkReserve(TChunkReserve &evChunkReserve) {
         result->StatusFlags = GetStatusFlags(evChunkReserve.Owner, evChunkReserve.OwnerGroupType);
     }
 
+    // Copy the cookie from the original request
+    result->Cookie = evChunkReserve.Cookie;
+
     guard.Release();
     ActorSystem->Send(evChunkReserve.Sender, result.Release());
     Mon.ChunkReserve.CountResponse();
@@ -3071,6 +3074,7 @@ bool TPDisk::PreprocessRequest(TRequestBase *request) {
                 LOG_ERROR_S(*ActorSystem, NKikimrServices::BS_PDISK, err.Str());
                 THolder<NPDisk::TEvChunkReserveResult> result(new NPDisk::TEvChunkReserveResult(errStatus,
                             GetStatusFlags(ev.Owner, ev.OwnerGroupType), err.Str()));
+                result->Cookie = ev.Cookie;
                 ActorSystem->Send(ev.Sender, result.Release());
                 Mon.ChunkReserve.CountResponse();
                 delete request;

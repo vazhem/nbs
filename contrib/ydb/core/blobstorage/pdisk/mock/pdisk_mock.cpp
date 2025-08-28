@@ -646,6 +646,7 @@ public:
         auto *msg = ev->Get();
         Y_ABORT_UNLESS(!Impl.CheckIsReadOnlyOwner(msg));
         auto res = std::make_unique<NPDisk::TEvChunkReserveResult>(NKikimrProto::OK, GetStatusFlags());
+        res->Cookie = msg->Cookie;
         if (TImpl::TOwner *owner = Impl.FindOwner(msg, res)) {
             if (Impl.GetNumFreeChunks() < msg->SizeChunks) {
                 PDISK_MOCK_LOG(NOTICE, PDM09, "received TEvChunkReserve", (Msg, msg->ToString()), (Error, "no free chunks"));
@@ -899,7 +900,9 @@ public:
     }
 
     void ErrorHandle(NPDisk::TEvChunkReserve::TPtr &ev) {
-        Send(ev->Sender, new NPDisk::TEvChunkReserveResult(NKikimrProto::CORRUPTED, 0, State->GetStateErrorReason()));
+        auto result = new NPDisk::TEvChunkReserveResult(NKikimrProto::CORRUPTED, 0, State->GetStateErrorReason());
+        result->Cookie = ev->Get()->Cookie;
+        Send(ev->Sender, result);
     }
 
     void ErrorHandle(NPDisk::TEvChunkForget::TPtr &ev) {

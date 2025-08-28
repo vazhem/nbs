@@ -58,7 +58,12 @@ NCloud::NProto::TError TProxyStorage::ReadBlocksLocal(
     PendingRequests[requestId] = std::move(requestCtx);
 
     // Send read request to DDisk actors
-    SendReadToDDisks(ctx, requestId, offset, size);
+    auto sendResult = SendReadToDDisks(ctx, requestId, offset, size);
+    if (NCloud::HasError(sendResult)) {
+        // Remove the pending request - error will be handled at higher level
+        PendingRequests.erase(requestId);
+        return sendResult;
+    }
 
     // Return immediately - response will be sent asynchronously
     return NCloud::MakeError(S_OK);
@@ -114,7 +119,12 @@ NCloud::NProto::TError TProxyStorage::WriteBlocksLocal(
     PendingRequests[requestId] = std::move(requestCtx);
 
     // Send write request to DDisk actors
-    SendWriteToDDisks(ctx, requestId, offset, size, data);
+    auto sendResult = SendWriteToDDisks(ctx, requestId, offset, size, data);
+    if (NCloud::HasError(sendResult)) {
+        // Remove the pending request - error will be handled at higher level
+        PendingRequests.erase(requestId);
+        return sendResult;
+    }
 
     // Return immediately - response will be sent asynchronously
     return NCloud::MakeError(S_OK);
@@ -159,19 +169,23 @@ NCloud::NProto::TError TProxyStorage::ZeroBlocks(
     PendingRequests[requestId] = std::move(requestCtx);
 
     // Send write request to DDisk actors (zero data)
-    SendWriteToDDisks(ctx, requestId, offset, size, zeroData);
+    auto sendResult = SendWriteToDDisks(ctx, requestId, offset, size, zeroData);
+    if (NCloud::HasError(sendResult)) {
+        // Remove the pending request - error will be handled at higher level
+        PendingRequests.erase(requestId);
+        return sendResult;
+    }
 
     // Return immediately - response will be sent asynchronously
     return NCloud::MakeError(S_OK);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Private methods
+// Helper methods
 
-void TProxyStorage::SendReadToDDisks(
+void TProxyStorage::SendZeroDataResponse(
     const TActorContext& ctx,
     ui64 requestId,
-    ui64 offset,
     ui32 size)
 {
     auto it = PendingRequests.find(requestId);
@@ -179,7 +193,30 @@ void TProxyStorage::SendReadToDDisks(
         return;
     }
 
-    const auto& requestCtx = it->second;
+    auto& requestCtx = it->second;
+    // Fill the read data with zeros
+    requestCtx.ReadData.assign(size, 0);
+
+    // Complete the request successfully
+    CompleteReadRequest(ctx, requestCtx);
+    PendingRequests.erase(it);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Private methods
+
+NCloud::NProto::TError TProxyStorage::SendReadToDDisks(
+    const TActorContext& ctx,
+    ui64 requestId,
+    ui64 offset,
+    ui32 size)
+{
+    auto it = PendingRequests.find(requestId);
+    if (it == PendingRequests.end()) {
+        return NCloud::MakeError(E_FAIL, "Request not found");
+    }
+
+    auto& requestCtx = it->second;
 
     // For ErasureMirror3Direct, we can read from any replica
     // Choose first available DDisk for simplicity
@@ -190,21 +227,48 @@ void TProxyStorage::SendReadToDDisks(
         if (!targetActorId) {
             LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
                 "[" << requestId << "] Invalid DDisk ActorId");
-            return;
+            return NCloud::MakeError(E_FAIL, "Invalid DDisk ActorId");
         }
 
-        auto request = std::make_unique<TEvBlobStorage::TEvDDiskReadRequest>(offset, size);
+        // Calculate which chunk this offset belongs to and get chunk info
+        ui64 regionIndex = CalculateRegionIndex(offset);
+        TChunkRegionInfo chunkInfo;
+        if (!PartitionState->FindChunkForRegion(regionIndex, chunkInfo)) {
+            LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+                "[" << requestId << "] No chunk allocated for offset " << offset
+                << " (region " << regionIndex << ") - returning zero data");
+
+            // Return zero data for unallocated regions
+            SendZeroDataResponse(ctx, requestId, size);
+            return NCloud::MakeError(S_OK);
+        }
+
+        // Calculate chunk-relative offset: offset - regionStartOffset
+        ui64 regionStartOffset = chunkInfo.StartOffset;
+        ui32 chunkRelativeOffset = static_cast<ui32>(offset - regionStartOffset);
+
+        auto request = std::make_unique<TEvBlobStorage::TEvDDiskReadRequest>();
+        request->Record.SetOffset(chunkRelativeOffset);  // Chunk-relative offset
+        request->Record.SetSize(size);
+        request->Record.SetChunkId(chunkInfo.ChunkId);
 
         LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
             "[" << requestId << "] SendReadToDDisks: requestId=" << requestId
-            << ", offset=" << offset << ", size=" << size
+            << ", absoluteOffset=" << offset << ", chunkRelativeOffset=" << chunkRelativeOffset
+            << ", size=" << size << ", chunkId=" << chunkInfo.ChunkId
             << ", target=" << targetActorId.ToString());
 
+        // Set pending responses to 1 for reads (we only read from one DDisk)
+        requestCtx.PendingResponses = 1;
+
         ctx.Send(targetActorId, request.release(), 0, requestId);
+        return NCloud::MakeError(S_OK);
     }
+
+    return NCloud::MakeError(E_FAIL, "No DDisk actors available");
 }
 
-void TProxyStorage::SendWriteToDDisks(
+NCloud::NProto::TError TProxyStorage::SendWriteToDDisks(
     const TActorContext& ctx,
     ui64 requestId,
     ui64 offset,
@@ -213,22 +277,49 @@ void TProxyStorage::SendWriteToDDisks(
 {
     auto it = PendingRequests.find(requestId);
     if (it == PendingRequests.end()) {
-        return;
+        return NCloud::MakeError(E_FAIL, "Request not found");
     }
 
-    const auto& requestCtx = it->second;
+    auto& requestCtx = it->second;
+
+    // Calculate which chunk this offset belongs to and allocate if needed
+    ui64 regionIndex = CalculateRegionIndex(offset);
+    TChunkRegionInfo chunkInfo;
+
+    if (!PartitionState->FindChunkForRegion(regionIndex, chunkInfo)) {
+        // With pre-allocation, all chunks should already be allocated
+        // If we reach here, it means pre-allocation didn't cover this region
+        LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << requestId << "] No chunk allocated for offset " << offset
+            << " (region " << regionIndex << ") - volume may not be fully pre-allocated");
+        return NCloud::MakeError(E_FAIL, "No chunk allocated for requested region");
+    }
+
+    // Calculate chunk-relative offset: offset - regionStartOffset
+    ui64 regionStartOffset = chunkInfo.StartOffset;
+    ui32 chunkRelativeOffset = static_cast<ui32>(offset - regionStartOffset);
 
     // For ErasureMirror3Direct, write to all replicas
     for (const auto& ddiskActorId : requestCtx.DDiskActorIds) {
-        auto request = std::make_unique<TEvBlobStorage::TEvDDiskWriteRequest>(offset, size, data);
+        auto request = std::make_unique<TEvBlobStorage::TEvDDiskWriteRequest>();
+        request->Record.SetOffset(chunkRelativeOffset);  // Chunk-relative offset
+        request->Record.SetSize(size);
+        request->Record.SetData(data);
+        request->Record.SetChunkId(chunkInfo.ChunkId);
 
         LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
             "[" << requestId << "] SendWriteToDDisks: requestId=" << requestId
-            << ", offset=" << offset << ", size=" << size
+            << ", absoluteOffset=" << offset << ", chunkRelativeOffset=" << chunkRelativeOffset
+            << ", size=" << size << ", chunkId=" << chunkInfo.ChunkId
             << ", target=" << ddiskActorId.ToString());
 
         ctx.Send(ddiskActorId, request.release(), 0, requestId);
     }
+
+    // Set pending responses to the number of DDisk actors we sent to
+    requestCtx.PendingResponses = requestCtx.DDiskActorIds.size();
+
+    return NCloud::MakeError(S_OK);
 }
 
 void TProxyStorage::HandleDDiskReadResponse(
@@ -360,6 +451,27 @@ void TProxyStorage::CompleteWriteRequest(
 
     // Reply to original request
     NCloud::Reply(ctx, *requestCtx.OriginalRequest, std::move(response));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Chunk allocation methods
+
+bool TProxyStorage::FindChunkForOffset(ui64 offset, ui32& chunkId)
+{
+    ui64 regionIndex = CalculateRegionIndex(offset);
+
+    TChunkRegionInfo chunkInfo;
+    if (PartitionState->FindChunkForRegion(regionIndex, chunkInfo)) {
+        chunkId = chunkInfo.ChunkId;
+        return true;
+    }
+
+    return false;  // Chunk not found for this region
+}
+
+ui64 TProxyStorage::CalculateRegionIndex(ui64 offset)
+{
+    return PartitionState->CalculateRegionIndex(offset);
 }
 
 } // namespace NCloud::NBlockStore::NStorage::NPartitionDirect

@@ -112,13 +112,19 @@ private:
         return NextRequestId++;
     }
 
-    void SendReadToDDisks(
+    // Helper methods
+    void SendZeroDataResponse(
+        const NActors::TActorContext& ctx,
+        ui64 requestId,
+        ui32 size);
+
+    NCloud::NProto::TError SendReadToDDisks(
         const NActors::TActorContext& ctx,
         ui64 requestId,
         ui64 offset,
         ui32 size);
 
-    void SendWriteToDDisks(
+    NCloud::NProto::TError SendWriteToDDisks(
         const NActors::TActorContext& ctx,
         ui64 requestId,
         ui64 offset,
@@ -132,6 +138,10 @@ private:
     void CompleteWriteRequest(
         const NActors::TActorContext& ctx,
         const TDDiskRequestContext& requestCtx);
+
+    // Chunk lookup methods (all chunks are pre-allocated)
+    bool FindChunkForOffset(ui64 offset, ui32& chunkId);
+    ui64 CalculateRegionIndex(ui64 offset);
 };
 
 } // namespace NCloud::NBlockStore::NStorage::NPartitionDirect

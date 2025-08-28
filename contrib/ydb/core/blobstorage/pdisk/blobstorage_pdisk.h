@@ -700,11 +700,19 @@ struct TEvChunkReserve : public TEventLocal<TEvChunkReserve, TEvBlobStorage::EvC
     TOwner Owner;
     TOwnerRound OwnerRound;
     ui32 SizeChunks;
+    ui64 Cookie = 0;  // Optional cookie for tracking requests
 
     TEvChunkReserve(TOwner owner, TOwnerRound ownerRound, ui32 sizeChunks)
         : Owner(owner)
         , OwnerRound(ownerRound)
         , SizeChunks(sizeChunks)
+    {}
+
+    TEvChunkReserve(TOwner owner, TOwnerRound ownerRound, ui32 sizeChunks, ui64 cookie)
+        : Owner(owner)
+        , OwnerRound(ownerRound)
+        , SizeChunks(sizeChunks)
+        , Cookie(cookie)
     {}
 
     TString ToString() const {
@@ -716,6 +724,9 @@ struct TEvChunkReserve : public TEventLocal<TEvChunkReserve, TEvBlobStorage::EvC
         str << "{EvChunkReserve ownerId# " << (ui32)record.Owner;
         str << " ownerRound# " << record.OwnerRound;
         str << " SizeChunks# " << record.SizeChunks;
+        if (record.Cookie) {
+            str << " Cookie# " << record.Cookie;
+        }
         str << "}";
         return str.Str();
     }
@@ -726,6 +737,7 @@ struct TEvChunkReserveResult : public TEventLocal<TEvChunkReserveResult, TEvBlob
     TVector<TChunkIdx> ChunkIds;
     TStatusFlags StatusFlags;
     TString ErrorReason;
+    ui64 Cookie = 0;  // Cookie from the original request
 
     TEvChunkReserveResult(NKikimrProto::EReplyStatus status, TStatusFlags statusFlags)
         : Status(status)
@@ -738,6 +750,12 @@ struct TEvChunkReserveResult : public TEventLocal<TEvChunkReserveResult, TEvBlob
         , ErrorReason(errorReason)
     {}
 
+    TEvChunkReserveResult(NKikimrProto::EReplyStatus status, TStatusFlags statusFlags, ui64 cookie)
+        : Status(status)
+        , StatusFlags(statusFlags)
+        , Cookie(cookie)
+    {}
+
     TString ToString() const {
         return ToString(*this);
     }
@@ -747,6 +765,9 @@ struct TEvChunkReserveResult : public TEventLocal<TEvChunkReserveResult, TEvBlob
         str << "{EvChunkReserveResult Status# " << NKikimrProto::EReplyStatus_Name(record.Status).data();
         str << " ErrorReason# \"" << record.ErrorReason << "\"";
         str << " StatusFlags# " << StatusFlagsToString(record.StatusFlags);
+        if (record.Cookie) {
+            str << " Cookie# " << record.Cookie;
+        }
         str << "}";
         return str.Str();
     }
@@ -1548,4 +1569,3 @@ struct TEvWriteMetadataResult : TEventLocal<TEvWriteMetadataResult, TEvBlobStora
 
 } // NPDisk
 } // NKikimr
-

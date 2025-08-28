@@ -82,9 +82,13 @@ STFUNC(TPartitionActor::StateWork)
         // YDB DDisk responses
         HFunc(NKikimr::TEvBlobStorage::TEvDDiskReadResponse, HandleDDiskReadResponse);
         HFunc(NKikimr::TEvBlobStorage::TEvDDiskWriteResponse, HandleDDiskWriteResponse);
+        HFunc(NKikimr::TEvBlobStorage::TEvDDiskReserveChunksResponse, HandleDDiskReserveChunksResponse);
 
         // PipeCache events
         HFunc(TEvPipeCache::TEvDeliveryProblem, HandleDeliveryProblem);
+
+        // Timer events for state machine retries
+        HFunc(TEvents::TEvWakeup, HandleWakeup);
 
         default:
             if (!HandleDefaultEvents(ev, SelfId())) {
@@ -108,6 +112,14 @@ void TPartitionActor::HandleWaitReady(
 
     auto response = std::make_unique<TEvPartition::TEvWaitReadyResponse>();
     NCloud::Reply(ctx, *ev, std::move(response));
+}
+
+void TPartitionActor::HandleWakeup(
+    const TEvents::TEvWakeup::TPtr& ev,
+    const NActors::TActorContext& ctx)
+{
+    Y_UNUSED(ev);
+    HandleRetryTimer(ctx);
 }
 
 void TPartitionActor::HandleReadBlocksLocalRequest(
@@ -141,6 +153,13 @@ void TPartitionActor::HandleReadBlocksLocalRequest(
         record.blockscount(),
         {const_cast<char*>(guard.Get()[0].Data()),
          record.blockscount() * State->GetBlockSize()});
+
+    // Handle errors from storage operations
+    if (NCloud::HasError(error)) {
+        auto response = std::make_unique<TEvService::TEvReadBlocksLocalResponse>(error);
+        NCloud::Reply(ctx, *ev, std::move(response));
+        return;
+    }
 }
 
 void TPartitionActor::HandleWriteBlocksLocalRequest(
@@ -174,6 +193,13 @@ void TPartitionActor::HandleWriteBlocksLocalRequest(
         record.BlocksCount,
         {const_cast<char*>(guard.Get()[0].Data()),
          record.BlocksCount * State->GetBlockSize()});
+
+    // Handle errors from storage operations
+    if (NCloud::HasError(error)) {
+        auto response = std::make_unique<TEvService::TEvWriteBlocksLocalResponse>(error);
+        NCloud::Reply(ctx, *ev, std::move(response));
+        return;
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -302,17 +328,22 @@ void TPartitionActor::HandleCreateStoragePoolResponse(
                     "[" << TabletID() << "]"
                     << " Storage pool creation status failed"
                     << " Error: " << status.GetErrorDescription());
+                RetryCurrentState(ctx, TStringBuilder() << "Storage pool status failure: "
+                                  << status.GetErrorDescription());
             }
         } else {
             LOG_WARN_S(ctx, TBlockStoreComponents::PARTITION,
                 "[" << TabletID() << "]"
                 << " No status in storage pool create response");
+            RetryCurrentState(ctx, "No status in storage pool create response");
         }
     } else {
         LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
             "[" << TabletID() << "]"
             << " Failed to create storage pool mirror-3-direct"
             << " Error: " << configResponse.GetErrorDescription());
+        RetryCurrentState(ctx, TStringBuilder() << "Storage pool creation failed: "
+                          << configResponse.GetErrorDescription());
     }
 }
 
@@ -327,12 +358,15 @@ void TPartitionActor::HandleQueryBaseConfigResponse(
         LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
             "[" << TabletID() << "] Failed to query base configuration: "
             << configResponse.GetErrorDescription());
+        RetryCurrentState(ctx, TStringBuilder() << "Base config query failed: "
+                          << configResponse.GetErrorDescription());
         return;
     }
 
     if (configResponse.StatusSize() == 0) {
         LOG_WARN_S(ctx, TBlockStoreComponents::PARTITION,
             "[" << TabletID() << "] No status in base config query response");
+        RetryCurrentState(ctx, "No status in base config query response");
         return;
     }
 
@@ -464,6 +498,7 @@ bool TPartitionActor::PrepareLoadState(
 
     // Read VirtualGroupId directly using dedicated method
     bool hasGroupId = db.ReadVirtualGroupId(args.VirtualGroupId);
+    bool hasChunkSize = db.ReadChunkSize(args.ChunkSize);
 
     if (hasGroupId) {
         LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
@@ -476,6 +511,17 @@ bool TPartitionActor::PrepareLoadState(
             << " No VirtualGroupId found in database");
     }
 
+    if (hasChunkSize) {
+        LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "]"
+            << " Loaded ChunkSize from database: " << args.ChunkSize);
+    } else {
+        args.ChunkSize = 0;
+        LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "]"
+            << " No ChunkSize found in database - will be set when DDisk responds");
+    }
+
     // Read DDisk information
     bool hasDDiskInfos = db.ReadDDiskInfos(args.DDiskInfos);
 
@@ -486,6 +532,28 @@ bool TPartitionActor::PrepareLoadState(
     } else {
         LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
             "[" << TabletID() << "] No DDisk information found in database");
+    }
+
+    // Read chunk regions
+    bool hasChunkRegions = db.ReadAllChunkRegions(args.ChunkRegions);
+    if (hasChunkRegions && !args.ChunkRegions.empty()) {
+        LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Loaded " << args.ChunkRegions.size()
+            << " chunk regions from database");
+    } else {
+        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] No chunk regions found in database");
+    }
+
+    // Read available chunks
+    bool hasAvailableChunks = db.ReadAvailableChunks(args.AvailableChunks);
+    if (hasAvailableChunks && !args.AvailableChunks.empty()) {
+        LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Loaded " << args.AvailableChunks.size()
+            << " available chunks from database");
+    } else {
+        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] No available chunks found in database");
     }
 
     LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
@@ -524,6 +592,18 @@ void TPartitionActor::CompleteLoadState(
             << " No existing VirtualGroupId in database");
     }
 
+    // Load ChunkSize from database
+    if (args.ChunkSize != 0) {
+        State->SetChunkSize(args.ChunkSize);
+        LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "]"
+            << " Restored ChunkSize from database: " << args.ChunkSize);
+    } else {
+        LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "]"
+            << " No ChunkSize found in database - will be set when DDisk responds");
+    }
+
     // Load DDisk information and set in state
     if (!args.DDiskInfos.empty()) {
         TVector<TDDiskInfo> ddiskInfos;
@@ -556,12 +636,58 @@ void TPartitionActor::CompleteLoadState(
             "[" << TabletID() << "] No DDisk information to restore");
     }
 
+    // Load chunk cache from database
+    TVector<TChunkRegionInfo> regionInfos;
+    TVector<TAvailableChunkInfo> chunkInfos;
+
+    regionInfos.reserve(args.ChunkRegions.size());
+    for (const auto& dbRegion : args.ChunkRegions) {
+        regionInfos.emplace_back(
+            dbRegion.StartOffset,
+            dbRegion.ChunkId,
+            dbRegion.DDiskServiceId
+        );
+    }
+
+    chunkInfos.reserve(args.AvailableChunks.size());
+    for (const auto& dbChunk : args.AvailableChunks) {
+        chunkInfos.emplace_back(
+            dbChunk.ChunkId,
+            dbChunk.DDiskServiceId,
+            static_cast<EChunkStatus>(dbChunk.Status),
+            dbChunk.RegionIndex
+        );
+    }
+
+    State->LoadChunkCaches(regionInfos, chunkInfos);
+
+    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Loaded chunk cache: " << regionInfos.size()
+        << " regions, " << chunkInfos.size() << " available chunks");
+
     LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
         "[" << TabletID() << "]"
         << " State data loaded");
 
-    // После загрузки состояния проверяем нужно ли создавать virtual group
-    CheckAndCreateVirtualGroup(ctx);
+    // State machine: determine next state based on loaded data
+    if (args.VirtualGroupId == 0) {
+        // No virtual group - need to create one
+        TransitionToState(EPartitionState::CreateDDiskGroups, ctx);
+    } else if (args.ChunkSize == 0) {
+        // Have group but no chunk size - need to learn it
+        TransitionToState(EPartitionState::GetChunkSize, ctx);
+    } else {
+        // Check if we need more chunks for full volume
+        ui64 volumeSize = static_cast<ui64>(State->GetBlockSize()) * State->GetBlockCount();
+        ui64 totalRegionsNeeded = (volumeSize + args.ChunkSize - 1) / args.ChunkSize;
+        ui32 currentRegionCount = State->GetChunkRegionCacheSize();
+
+        if (currentRegionCount < totalRegionsNeeded) {
+            TransitionToState(EPartitionState::PreAllocateChunks, ctx);
+        } else {
+            TransitionToState(EPartitionState::Ready, ctx);
+        }
+    }
 }
 
 void TPartitionActor::CheckAndCreateVirtualGroup(const NActors::TActorContext& ctx)
@@ -703,6 +829,50 @@ void TPartitionActor::CompleteSaveVirtualGroupId(
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// SaveChunkSize transaction
+
+bool TPartitionActor::PrepareSaveChunkSize(
+    const NActors::TActorContext& ctx,
+    NKikimr::NTabletFlatExecutor::TTransactionContext& tx,
+    TTxPartitionDirect::TSaveChunkSize& args)
+{
+    Y_UNUSED(ctx);
+    Y_UNUSED(tx);  // No preparation needed for simple write
+    Y_UNUSED(args);
+
+    LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "]"
+        << " Preparing to save ChunkSize: " << args.ChunkSize);
+
+    return true;
+}
+
+void TPartitionActor::ExecuteSaveChunkSize(
+    const NActors::TActorContext& ctx,
+    NKikimr::NTabletFlatExecutor::TTransactionContext& tx,
+    TTxPartitionDirect::TSaveChunkSize& args)
+{
+    Y_UNUSED(ctx);
+
+    TPartitionDirectDatabase db(tx.DB);
+
+    LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "]"
+        << " Saving ChunkSize to database: " << args.ChunkSize);
+
+    db.WriteChunkSize(args.ChunkSize);
+}
+
+void TPartitionActor::CompleteSaveChunkSize(
+    const NActors::TActorContext& ctx,
+    TTxPartitionDirect::TSaveChunkSize& args)
+{
+    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "]"
+        << " ChunkSize saved to database: " << args.ChunkSize);
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // YDB DDisk response handlers
 
 void TPartitionActor::HandleDDiskReadResponse(
@@ -800,6 +970,571 @@ void TPartitionActor::CompleteSaveGroupInfo(
         "[" << TabletID() << "]"
         << " SaveGroupInfo transaction completed for GroupId: " << args.GroupId
         << " with " << ddiskInfos.size() << " DDisk actors");
+
+    // State machine: after group creation, move to GetChunkSize
+    if (CurrentState == EPartitionState::CreateDDiskGroups) {
+        TransitionToState(EPartitionState::GetChunkSize, ctx);
+    } else {
+        LOG_WARN_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Unexpected state during SaveGroupInfo completion: "
+            << StateToString(CurrentState) << " - retrying CreateDDiskGroups");
+        RetryCurrentState(ctx, "Unexpected state during SaveGroupInfo completion");
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// State machine implementation
+
+void TPartitionActor::TransitionToState(EPartitionState newState, const NActors::TActorContext& ctx)
+{
+    EPartitionState oldState = CurrentState;
+    CurrentState = newState;
+
+    if (oldState != newState) {
+        RetryCount = 0;  // Reset retry count on state transition
+
+        LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] State transition: "
+            << StateToString(oldState) << " -> " << StateToString(newState));
+    } else {
+        // Retry
+        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Retry: "
+            << StateToString(newState));
+    }
+
+    switch (newState) {
+        case EPartitionState::CreateDDiskGroups: {
+            // Create a storage pool for this partition
+            auto poolName = GetStoragePoolName();
+            CheckAndCreateVirtualGroup(ctx);
+            break;
+        }
+        case EPartitionState::GetChunkSize:
+            RequestInitialChunksForChunkSize(ctx);
+            break;
+
+        case EPartitionState::PreAllocateChunks:
+            RequestAllVolumeChunks(ctx);
+            break;
+
+        case EPartitionState::Ready:
+            LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+                "[" << TabletID() << "] Partition fully initialized and ready for IO");
+            break;
+
+        case EPartitionState::Boot:
+            // No action needed - handled by tablet framework
+            break;
+    }
+}
+
+void TPartitionActor::RetryCurrentState(const NActors::TActorContext& ctx, const TString& reason)
+{
+    if (RetryCount >= MAX_RETRIES) {
+        LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Max retries (" << MAX_RETRIES
+            << ") exceeded for state " << StateToString(CurrentState)
+            << ", reason: " << reason);
+        // For now, continue retrying indefinitely as requested
+        RetryCount = 0;
+    }
+
+    RetryCount++;
+
+    LOG_WARN_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Retrying state " << StateToString(CurrentState)
+        << " (attempt " << RetryCount << "/" << MAX_RETRIES << "), reason: " << reason);
+
+    ScheduleRetry(ctx, reason);
+}
+
+void TPartitionActor::ScheduleRetry(const NActors::TActorContext& ctx, const TString& reason)
+{
+    // Schedule retry with exponential backoff
+    ui32 delayMs = RETRY_DELAY_MS * (1 << std::min(RetryCount - 1, 5u));  // Cap at 32 seconds
+
+    LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Scheduling retry in " << delayMs << "ms, reason: " << reason);
+
+    ctx.Schedule(TDuration::MilliSeconds(delayMs), new TEvents::TEvWakeup());
+}
+
+void TPartitionActor::HandleRetryTimer(const NActors::TActorContext& ctx)
+{
+    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Retry timer fired for state " << StateToString(CurrentState));
+
+    // Re-execute current state logic
+    TransitionToState(CurrentState, ctx);
+}
+
+TString TPartitionActor::StateToString(EPartitionState state) const
+{
+    switch (state) {
+        case EPartitionState::Boot:
+            return "Boot";
+        case EPartitionState::CreateDDiskGroups:
+            return "CreateDDiskGroups";
+        case EPartitionState::GetChunkSize:
+            return "GetChunkSize";
+        case EPartitionState::PreAllocateChunks:
+            return "PreAllocateChunks";
+        case EPartitionState::Ready:
+            return "Ready";
+        default:
+            return "Unknown";
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Chunk management methods
+
+void TPartitionActor::RequestChunksFromDDisks(const NActors::TActorContext& ctx)
+{
+    // This method now delegates to the appropriate state-specific method
+    switch (CurrentState) {
+        case EPartitionState::GetChunkSize:
+            RequestInitialChunksForChunkSize(ctx);
+            break;
+        case EPartitionState::PreAllocateChunks:
+            RequestAllVolumeChunks(ctx);
+            break;
+        default:
+            LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+                "[" << TabletID() << "] RequestChunksFromDDisks called in invalid state: "
+                << StateToString(CurrentState));
+    }
+}
+
+void TPartitionActor::RequestInitialChunksForChunkSize(const NActors::TActorContext& ctx)
+{
+    const auto& ddiskServiceIds = State->GetDDiskServiceIds();
+    if (ddiskServiceIds.empty()) {
+        LOG_WARN_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] No DDisk actors available for initial chunk reservation");
+        RetryCurrentState(ctx, "No DDisk actors available for initial chunk reservation");
+        return;
+    }
+
+    // Request small number of chunks to learn ChunkSize
+    const ui32 initialChunksPerDDisk = 10;
+
+    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Requesting initial " << initialChunksPerDDisk
+        << " chunks from " << ddiskServiceIds.size() << " DDisk actors to learn ChunkSize");
+
+    for (size_t i = 0; i < ddiskServiceIds.size(); ++i) {
+        const auto& ddiskActorId = ddiskServiceIds[i];
+        auto request = std::make_unique<TEvBlobStorage::TEvDDiskReserveChunksRequest>();
+        request->Record.SetChunkCount(initialChunksPerDDisk);
+
+        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Sending initial chunk reservation request to DDisk: "
+            << ddiskActorId.ToString());
+
+        // Use cookie to encode the DDisk index, so we can identify which DDisk responded
+        ui64 ddiskIndex = static_cast<ui64>(i);
+        ctx.Send(ddiskActorId, request.release(), 0, ddiskIndex);
+    }
+}
+
+void TPartitionActor::RequestAllVolumeChunks(const NActors::TActorContext& ctx)
+{
+    const auto& ddiskServiceIds = State->GetDDiskServiceIds();
+    if (ddiskServiceIds.empty()) {
+        LOG_WARN_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] No DDisk actors available for volume chunk allocation");
+        RetryCurrentState(ctx, "No DDisk actors available for volume chunk allocation");
+        return;
+    }
+
+    ui32 chunkSize = State->GetChunkSize();
+    if (chunkSize == 0) {
+        LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Cannot allocate all volume chunks: ChunkSize unknown");
+        RetryCurrentState(ctx, "ChunkSize unknown for volume chunk allocation");
+        return;
+    }
+
+    // Calculate total volume size and required chunks
+    ui64 volumeSize = static_cast<ui64>(State->GetBlockSize()) * State->GetBlockCount();
+    ui64 totalChunksNeeded = (volumeSize + chunkSize - 1) / chunkSize;  // Round up
+    ui32 ddiskCount = static_cast<ui32>(ddiskServiceIds.size());
+    ui32 chunksPerDDisk = static_cast<ui32>((totalChunksNeeded + ddiskCount - 1) / ddiskCount);  // Round up
+
+    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Pre-allocating ALL chunks for volume: "
+        << " VolumeSize=" << volumeSize << " bytes"
+        << " ChunkSize=" << chunkSize << " bytes"
+        << " TotalChunks=" << totalChunksNeeded
+        << " DDisks=" << ddiskCount
+        << " ChunksPerDDisk=" << chunksPerDDisk);
+
+    for (size_t i = 0; i < ddiskServiceIds.size(); ++i) {
+        const auto& ddiskActorId = ddiskServiceIds[i];
+        auto request = std::make_unique<TEvBlobStorage::TEvDDiskReserveChunksRequest>();
+        request->Record.SetChunkCount(chunksPerDDisk);
+
+        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Sending volume chunk reservation request to DDisk: "
+            << ddiskActorId.ToString() << " for " << chunksPerDDisk << " chunks");
+
+        // Use cookie to encode the DDisk index, so we can identify which DDisk responded
+        ui64 ddiskIndex = static_cast<ui64>(i);
+        ctx.Send(ddiskActorId, request.release(), 0, ddiskIndex);
+    }
+}
+
+void TPartitionActor::HandleDDiskReserveChunksResponse(
+    const TEvBlobStorage::TEvDDiskReserveChunksResponse::TPtr& ev,
+    const NActors::TActorContext& ctx)
+{
+    const auto* msg = ev->Get();
+    const auto& record = msg->Record;
+
+    LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Received chunk reservation response from DDisk: "
+        << ev->Sender.ToString() << " status: " << record.GetStatus()
+        << " chunks: " << record.ChunkIdsSize());
+
+    if (record.GetStatus() != NKikimrProto::OK) {
+        LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Chunk reservation failed from DDisk: "
+            << ev->Sender.ToString() << " error: " << record.GetErrorReason());
+        return;
+    }
+
+    // Set chunk size from DDisk response (if available)
+    if (record.HasChunkSize() && record.GetChunkSize() > 0) {
+        ui32 receivedChunkSize = record.GetChunkSize();
+
+        // Only save ChunkSize if it's not already set (first time learning it)
+        if (State->GetChunkSize() == 0) {
+            State->SetChunkSize(receivedChunkSize);
+
+            LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+                "[" << TabletID() << "] Set chunk size to " << receivedChunkSize
+                << " bytes from DDisk: " << ev->Sender.ToString()
+                << " - saving to database");
+
+            // Save ChunkSize to database for persistence across restarts
+            auto args = TTxPartitionDirect::TSaveChunkSize{};
+            args.ChunkSize = receivedChunkSize;
+            ExecuteTx<TSaveChunkSize>(ctx, std::move(args));
+        } else {
+            // Verify chunk size consistency across DDisks
+            ui32 currentChunkSize = State->GetChunkSize();
+            if (currentChunkSize != receivedChunkSize) {
+                LOG_WARN_S(ctx, TBlockStoreComponents::PARTITION,
+                    "[" << TabletID() << "] ChunkSize mismatch! Current: "
+                    << currentChunkSize << ", received: " << receivedChunkSize
+                    << " from DDisk: " << ev->Sender.ToString());
+            }
+        }
+    }
+
+    // Extract DDisk index from cookie to identify which DDisk sent the response
+    ui64 ddiskIndex = ev->Cookie;
+    const auto& ddiskServiceIds = State->GetDDiskServiceIds();
+
+    if (ddiskIndex >= ddiskServiceIds.size()) {
+        LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Invalid DDisk index in cookie: " << ddiskIndex
+            << " (max: " << ddiskServiceIds.size() << ")");
+        return;
+    }
+
+    // Use the DDisk ActorId as service ID for storage
+    TString ddiskServiceId = ddiskServiceIds[ddiskIndex].ToString();
+
+    // Pre-allocate chunks and assign them to regions
+    TTxPartitionDirect::TPreallocateVolumeChunks args;
+    args.DDiskServiceId = ddiskServiceId;
+    args.ChunkIds.reserve(record.ChunkIdsSize());
+
+    for (ui32 chunkId : record.GetChunkIds()) {
+        args.ChunkIds.push_back(chunkId);
+    }
+
+    // Calculate starting region index for this DDisk
+    // Distribute regions evenly across DDisks
+    ui32 chunksPerDDisk = static_cast<ui32>(args.ChunkIds.size());
+    args.StartRegionIndex = ddiskIndex * chunksPerDDisk;
+
+    LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Pre-allocating " << args.ChunkIds.size()
+        << " chunks from DDisk[" << ddiskIndex << "] " << ddiskServiceId
+        << " starting from region " << args.StartRegionIndex);
+
+    // Determine which transaction to use based on current state
+    if (CurrentState == EPartitionState::GetChunkSize) {
+        // Save initial chunks without pre-assignment
+        TTxPartitionDirect::TSaveReservedChunks saveArgs;
+        saveArgs.DDiskServiceId = ddiskServiceId;
+        saveArgs.ChunkIds = args.ChunkIds;
+        ExecuteTx<TSaveReservedChunks>(ctx, saveArgs);
+    } else if (CurrentState == EPartitionState::PreAllocateChunks) {
+        // Pre-allocate and assign chunks to regions
+        ExecuteTx<TPreallocateVolumeChunks>(ctx, args);
+    } else {
+        LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Received chunk reservation response in unexpected state: "
+            << StateToString(CurrentState));
+    }
+}
+
+// This method is no longer needed as we use DDisk service ID directly
+
+ui64 TPartitionActor::CalculateRegionIndex(ui64 offset)
+{
+    return State->CalculateRegionIndex(offset);
+}
+
+ui64 TPartitionActor::CalculateRegionStartOffset(ui64 regionIndex)
+{
+    return State->CalculateRegionStartOffset(regionIndex);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// SaveReservedChunks transaction
+
+bool TPartitionActor::PrepareSaveReservedChunks(
+    const NActors::TActorContext& ctx,
+    TTransactionContext& tx,
+    TTxPartitionDirect::TSaveReservedChunks& args)
+{
+    Y_UNUSED(ctx);
+    Y_UNUSED(tx);
+    Y_UNUSED(args);
+
+    // Nothing to prepare - all data should be in memory
+    return true;
+}
+
+void TPartitionActor::ExecuteSaveReservedChunks(
+    const NActors::TActorContext& ctx,
+    TTransactionContext& tx,
+    TTxPartitionDirect::TSaveReservedChunks& args)
+{
+    Y_UNUSED(ctx);
+
+    TPartitionDirectDatabase db(tx.DB);
+
+    // Save each reserved chunk to the database
+    for (ui32 chunkId : args.ChunkIds) {
+        db.WriteAvailableChunk(
+            chunkId,
+            args.DDiskServiceId,
+            static_cast<ui32>(EChunkStatus::Available),
+            0  // regionIndex, unused for available chunks
+        );
+    }
+
+    LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Saved " << args.ChunkIds.size()
+        << " chunks from DDisk " << args.DDiskServiceId);
+}
+
+void TPartitionActor::CompleteSaveReservedChunks(
+    const NActors::TActorContext& ctx,
+    TTxPartitionDirect::TSaveReservedChunks& args)
+{
+    // Update in-memory cache with the new chunks
+    for (ui32 chunkId : args.ChunkIds) {
+        TAvailableChunkInfo chunkInfo{
+            chunkId,
+            args.DDiskServiceId,
+            EChunkStatus::Available,
+            0  // regionIndex, unused for available chunks
+        };
+        State->AddAvailableChunkToCache(chunkInfo);
+    }
+
+    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Reserved " << args.ChunkIds.size()
+        << " chunks from DDisk " << args.DDiskServiceId);
+
+    // State machine: after saving initial chunks, move to PreAllocateChunks
+    if (CurrentState == EPartitionState::GetChunkSize) {
+        TransitionToState(EPartitionState::PreAllocateChunks, ctx);
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// PreallocateVolumeChunks transaction
+
+bool TPartitionActor::PreparePreallocateVolumeChunks(
+    const NActors::TActorContext& ctx,
+    TTransactionContext& tx,
+    TTxPartitionDirect::TPreallocateVolumeChunks& args)
+{
+    Y_UNUSED(ctx);
+    Y_UNUSED(tx);
+    Y_UNUSED(args);
+
+    // Nothing to prepare - all data should be in memory
+    return true;
+}
+
+void TPartitionActor::ExecutePreallocateVolumeChunks(
+    const NActors::TActorContext& ctx,
+    TTransactionContext& tx,
+    TTxPartitionDirect::TPreallocateVolumeChunks& args)
+{
+    Y_UNUSED(ctx);
+
+    TPartitionDirectDatabase db(tx.DB);
+
+    // Save chunks as available first
+    for (ui32 chunkId : args.ChunkIds) {
+        db.WriteAvailableChunk(
+            chunkId,
+            args.DDiskServiceId,
+            static_cast<ui32>(EChunkStatus::Available),
+            0  // regionIndex, unused for available chunks
+        );
+    }
+
+    // Pre-assign chunks to regions
+    ui32 chunkIndex = 0;
+    for (ui32 chunkId : args.ChunkIds) {
+        ui64 regionIndex = args.StartRegionIndex + chunkIndex;
+        ui64 startOffset = State->CalculateRegionStartOffset(regionIndex);
+
+        // Write region mapping
+        db.WriteChunkRegion(startOffset, chunkId, args.DDiskServiceId);
+
+        // Update chunk status to allocated
+        db.UpdateChunkStatus(chunkId, static_cast<ui32>(EChunkStatus::Allocated), regionIndex);
+
+        chunkIndex++;
+    }
+
+    LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Pre-allocated " << args.ChunkIds.size()
+        << " chunks from DDisk " << args.DDiskServiceId
+        << " starting from region " << args.StartRegionIndex);
+}
+
+void TPartitionActor::CompletePreallocateVolumeChunks(
+    const NActors::TActorContext& ctx,
+    TTxPartitionDirect::TPreallocateVolumeChunks& args)
+{
+    // Update in-memory caches
+    ui32 chunkIndex = 0;
+    for (ui32 chunkId : args.ChunkIds) {
+        // Add to available chunks cache (marked as allocated)
+        TAvailableChunkInfo chunkInfo{
+            chunkId,
+            args.DDiskServiceId,
+            EChunkStatus::Allocated,  // Mark as allocated
+            0  // regionIndex, unused for available chunks
+        };
+        State->AddAvailableChunkToCache(chunkInfo);
+
+        // Add region mapping to cache
+        ui64 regionIndex = args.StartRegionIndex + chunkIndex;
+        ui64 startOffset = State->CalculateRegionStartOffset(regionIndex);
+
+        TChunkRegionInfo regionInfo{
+            startOffset,
+            chunkId,
+            args.DDiskServiceId
+        };
+        State->AddChunkRegionToCache(regionInfo);
+
+        chunkIndex++;
+    }
+
+    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Pre-allocated and assigned " << args.ChunkIds.size()
+        << " chunks from DDisk " << args.DDiskServiceId
+        << " to regions starting from " << args.StartRegionIndex);
+
+    // Check if all DDisks have completed their pre-allocation
+    ui32 chunkSize = State->GetChunkSize();
+    ui64 volumeSize = static_cast<ui64>(State->GetBlockSize()) * State->GetBlockCount();
+    ui64 totalRegionsNeeded = (volumeSize + chunkSize - 1) / chunkSize;  // Round up
+    ui32 currentRegionCount = State->GetChunkRegionCacheSize();
+
+    if (currentRegionCount >= totalRegionsNeeded) {
+        // All regions allocated - transition to Ready state
+        TransitionToState(EPartitionState::Ready, ctx);
+    } else {
+        LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Pre-allocation progress: "
+            << currentRegionCount << "/" << totalRegionsNeeded << " regions allocated");
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// AllocateChunkForRegion transaction
+
+bool TPartitionActor::PrepareAllocateChunkForRegion(
+    const NActors::TActorContext& ctx,
+    TTransactionContext& tx,
+    TTxPartitionDirect::TAllocateChunkForRegion& args)
+{
+    Y_UNUSED(ctx);
+
+    TPartitionDirectDatabase db(tx.DB);
+
+    // Read current chunk region to see if it already exists
+    TPartitionDirectDatabase::TChunkRegion existingRegion;
+    if (db.ReadChunkRegion(args.StartOffset, existingRegion)) {
+        args.ChunkRegion = existingRegion;
+    }
+
+    return true;
+}
+
+void TPartitionActor::ExecuteAllocateChunkForRegion(
+    const NActors::TActorContext& ctx,
+    TTransactionContext& tx,
+    TTxPartitionDirect::TAllocateChunkForRegion& args)
+{
+    Y_UNUSED(ctx);
+
+    TPartitionDirectDatabase db(tx.DB);
+
+    // If region doesn't already exist, create it
+    if (!args.ChunkRegion) {
+        db.WriteChunkRegion(args.StartOffset, args.ChunkId, args.DDiskServiceId);
+
+        // Mark chunk as allocated
+        db.UpdateChunkStatus(args.ChunkId, static_cast<ui32>(EChunkStatus::Allocated), 0);
+
+        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Allocated chunk " << args.ChunkId
+            << " for region starting at offset " << args.StartOffset);
+    } else {
+        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Region at offset " << args.StartOffset
+            << " already exists with chunk " << args.ChunkRegion->ChunkId);
+    }
+}
+
+void TPartitionActor::CompleteAllocateChunkForRegion(
+    const NActors::TActorContext& ctx,
+    TTxPartitionDirect::TAllocateChunkForRegion& args)
+{
+    // Update in-memory cache if new region was created
+    if (!args.ChunkRegion) {
+        TChunkRegionInfo regionInfo{
+            args.StartOffset,
+            args.ChunkId,
+            args.DDiskServiceId
+        };
+        State->AddChunkRegionToCache(regionInfo);
+
+        // Update chunk status in cache
+        State->UpdateChunkStatus(args.ChunkId, EChunkStatus::Allocated, 0);
+
+        LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Successfully allocated chunk " << args.ChunkId
+            << " for region starting at offset " << args.StartOffset);
+    }
 }
 
 }   // namespace NCloud::NBlockStore::NStorage::NPartitionDirect

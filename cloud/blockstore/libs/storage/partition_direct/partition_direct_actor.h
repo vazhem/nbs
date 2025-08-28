@@ -30,6 +30,16 @@ class TPartitionActor final
 public:
     static constexpr auto LogComponent = TBlockStoreComponents::PARTITION;
 
+    // Initialization state machine
+    enum class EPartitionState
+    {
+        Boot = 0,           // Initial state, schema initialization
+        CreateDDiskGroups,  // Creating storage pool and DDisk groups
+        GetChunkSize,       // First chunk request to learn PDisk configuration
+        PreAllocateChunks,  // Pre-allocate all chunks for volume
+        Ready              // Fully initialized, ready for IO
+    };
+
     // Transaction counters (minimal implementation)
     struct TTransactionCounters
     {
@@ -38,7 +48,11 @@ public:
             TX_InitSchema,
             TX_LoadState,
             TX_SaveVirtualGroupId,
-            TX_SaveGroupInfo
+            TX_SaveChunkSize,
+            TX_SaveGroupInfo,
+            TX_SaveReservedChunks,
+            TX_PreallocateVolumeChunks,
+            TX_AllocateChunkForRegion
         };
     };
     using TCounters = TTransactionCounters;
@@ -48,6 +62,12 @@ private:
     const NProto::TPartitionConfig PartitionConfig;
     const TDiagnosticsConfigPtr DiagnosticsConfig;
     std::unique_ptr<TPartitionState> State;
+
+    // State machine
+    EPartitionState CurrentState = EPartitionState::Boot;
+    ui32 RetryCount = 0;
+    static constexpr ui32 MAX_RETRIES = 10;
+    static constexpr ui32 RETRY_DELAY_MS = 1000;  // 1 second
 
 public:
     TPartitionActor(
@@ -79,6 +99,10 @@ private:
 
     void HandleWaitReady(
         const TEvPartition::TEvWaitReadyRequest::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
+    void HandleWakeup(
+        const TEvents::TEvWakeup::TPtr& ev,
         const NActors::TActorContext& ctx);
 
     // Обработчики запросов vhost
@@ -115,6 +139,10 @@ private:
         const NKikimr::TEvBlobStorage::TEvDDiskWriteResponse::TPtr& ev,
         const NActors::TActorContext& ctx);
 
+    void HandleDDiskReserveChunksResponse(
+        const NKikimr::TEvBlobStorage::TEvDDiskReserveChunksResponse::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
     // PipeCache event handlers
     void HandleDeliveryProblem(
         const TEvPipeCache::TEvDeliveryProblem::TPtr& ev,
@@ -125,6 +153,21 @@ private:
     void RequestStoragePoolGroups(const NActors::TActorContext& ctx);
     TString GetStoragePoolName();
 
+    // State machine methods
+    void TransitionToState(EPartitionState newState, const NActors::TActorContext& ctx);
+    void RetryCurrentState(const NActors::TActorContext& ctx, const TString& reason);
+    void ScheduleRetry(const NActors::TActorContext& ctx, const TString& reason);
+    void HandleRetryTimer(const NActors::TActorContext& ctx);
+    TString StateToString(EPartitionState state) const;
+
+    // Additional methods for chunk management
+    void RequestChunksFromDDisks(const NActors::TActorContext& ctx);
+    void RequestInitialChunksForChunkSize(const NActors::TActorContext& ctx);
+    void RequestAllVolumeChunks(const NActors::TActorContext& ctx);
+    ui64 CalculateRegionIndex(ui64 offset);
+    ui64 CalculateRegionStartOffset(ui64 regionIndex);
+
+private:
     BLOCKSTORE_PARTITION_DIRECT_TRANSACTIONS(BLOCKSTORE_IMPLEMENT_TRANSACTION, TTxPartitionDirect)
 };
 
