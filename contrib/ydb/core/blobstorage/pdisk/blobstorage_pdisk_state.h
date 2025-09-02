@@ -244,6 +244,7 @@ struct TChunkState {
     TOwner OwnerId;
     ECommitState CommitState;
     ui64 CommitsInProgress;
+    bool IsRawChunk;
 
     TChunkState()
         : Nonce(0)
@@ -253,6 +254,7 @@ struct TChunkState {
         , OwnerId(OwnerUnallocated)
         , CommitState(FREE)
         , CommitsInProgress(0)
+        , IsRawChunk(false)
     {}
 
     bool HasAnyOperationsInProgress() const {

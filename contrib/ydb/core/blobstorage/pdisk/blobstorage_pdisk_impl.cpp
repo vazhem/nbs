@@ -399,18 +399,19 @@ ui32 TPDisk::SystemChunkSize(const TDiskFormat& format, ui32 userAccessibleChunk
 }
 
 void ParsePayloadFromSectorOffset(const TDiskFormat& format, ui64 firstSector, ui64 lastSector, ui64 currentSector,
-        ui64 *outPayloadBytes, ui64 *outPayloadOffset) {
+        ui64 *outPayloadBytes, ui64 *outPayloadOffset, bool isRawChunk) {
     Y_VERIFY_S(firstSector <= currentSector && currentSector <= lastSector, firstSector << " <= " << currentSector
             << " <= " << lastSector);
 
-    *outPayloadBytes = (lastSector + 1 - currentSector) * format.SectorPayloadSize();
-    *outPayloadOffset = (currentSector - firstSector) * format.SectorPayloadSize();
+    const ui64 sectorPayloadSize = isRawChunk ? format.SectorSize : format.SectorPayloadSize();
+    *outPayloadBytes = (lastSector + 1 - currentSector) * sectorPayloadSize;
+    *outPayloadOffset = (currentSector - firstSector) * sectorPayloadSize;
 }
 
 bool ParseSectorOffset(const TDiskFormat& format, TActorSystem *actorSystem, ui32 pDiskId, ui64 offset, ui64 size,
-        ui64 &outSectorIdx, ui64 &outLastSectorIdx, ui64 &outSectorOffset) {
+        ui64 &outSectorIdx, ui64 &outLastSectorIdx, ui64 &outSectorOffset, bool isRawChunk) {
     const ui64 chunkSizeUsableSectors = format.ChunkSize / format.SectorSize;
-    const ui64 sectorPayloadSize = format.SectorPayloadSize();
+    const ui64 sectorPayloadSize = isRawChunk ? format.SectorSize : format.SectorPayloadSize();
     Y_ABORT_UNLESS(sectorPayloadSize > 0);
     ui64 lastSectorIdx = (offset + size + sectorPayloadSize - 1) / sectorPayloadSize - 1;
     outLastSectorIdx = lastSectorIdx;
@@ -864,12 +865,16 @@ bool TPDisk::ChunkWritePiece(TChunkWrite *evChunkWrite, ui32 pieceShift, ui32 pi
     ui64 desiredSectorIdx = 0;
     ui64 sectorOffset = 0;
     ui64 lastSectorIdx;
+
+    bool isRawChunk = ChunkState[chunkIdx].IsRawChunk;
     if (!ParseSectorOffset(Format, ActorSystem, PDiskId, evChunkWrite->Offset + evChunkWrite->BytesWritten,
-            evChunkWrite->TotalSize - evChunkWrite->BytesWritten, desiredSectorIdx, lastSectorIdx, sectorOffset)) {
+            evChunkWrite->TotalSize - evChunkWrite->BytesWritten, desiredSectorIdx, lastSectorIdx, sectorOffset,
+            isRawChunk)) {
         guard.Release();
         TString err = Sprintf("PDiskId# %" PRIu32 " Can't write chunk: incorrect offset/size offset# %" PRIu32
-                " size# %" PRIu32 " chunkIdx# %" PRIu32 " ownerId# %" PRIu32, (ui32)PDiskId, (ui32)evChunkWrite->Offset,
-                (ui32)evChunkWrite->TotalSize, (ui32)chunkIdx, (ui32)evChunkWrite->Owner);
+                " size# %" PRIu32 " chunkIdx# %" PRIu32 " ownerId# %" PRIu32 " isRawChunk# %s",
+                (ui32)PDiskId, (ui32)evChunkWrite->Offset, (ui32)evChunkWrite->TotalSize, (ui32)chunkIdx,
+                (ui32)evChunkWrite->Owner, isRawChunk ? "true" : "false");
         LOG_ERROR(*ActorSystem, NKikimrServices::BS_PDISK, "%s", err.c_str());
         SendChunkWriteError(*evChunkWrite, err, NKikimrProto::ERROR);
         return true;
@@ -878,8 +883,10 @@ bool TPDisk::ChunkWritePiece(TChunkWrite *evChunkWrite, ui32 pieceShift, ui32 pi
     TChunkState &state = ChunkState[chunkIdx];
     state.CurrentNonce = state.Nonce + (ui64)desiredSectorIdx;
     ui32 dataChunkSizeSectors = Format.ChunkSize / Format.SectorSize;
+    // Use chunk type determined during allocation
+    ui64 chunkMagic = state.IsRawChunk ? Format.MagicRawChunk : Format.MagicDataChunk;
     TChunkWriter writer(Mon, *BlockDevice.Get(), Format, state.CurrentNonce, Format.ChunkKey, BufferPool.Get(),
-            desiredSectorIdx, dataChunkSizeSectors, Format.MagicDataChunk, chunkIdx, nullptr, desiredSectorIdx,
+            desiredSectorIdx, dataChunkSizeSectors, chunkMagic, chunkIdx, nullptr, desiredSectorIdx,
             nullptr, ActorSystem, PDiskId, &DriveModel, Cfg->UseT1ha0HashInFooter, Cfg->EnableSectorEncryption);
 
     guard.Release();
@@ -900,6 +907,12 @@ bool TPDisk::ChunkWritePiece(TChunkWrite *evChunkWrite, ui32 pieceShift, ui32 pi
                 if (data) {
                     ui8 *source = data + evChunkWrite->CurrentPartOffset;
                     NSan::CheckMemIsInitialized(source, sizeToWrite);
+                    LOG_ERROR_S(*ActorSystem, NKikimrServices::BS_PDISK,
+                        "PDisk WRITE DEBUG: chunk=" << evChunkWrite->ChunkIdx
+                        << " offset=" << evChunkWrite->Offset + evChunkWrite->BytesWritten
+                        << " size=" << sizeToWrite
+                        << " data[0-7]=[ " << (int)source[0] << " " << (int)source[1] << " " << (int)source[2] << " " << (int)source[3] << " " << (int)source[4] << " " << (int)source[5] << " " << (int)source[6] << " " << (int)source[7] << " ]"
+                        << " SectorPayloadSize=" << Format.SectorPayloadSize());
                     writer.WriteData(source, sizeToWrite, evChunkWrite->ReqId, &traceId);
                     *Mon.BandwidthPChunkPayload += sizeToWrite;
                 } else {
@@ -917,10 +930,16 @@ bool TPDisk::ChunkWritePiece(TChunkWrite *evChunkWrite, ui32 pieceShift, ui32 pi
             ui32 sizeToWrite = remainingPartSize;
             bytesAvailable -= remainingPartSize;
             ui8 *data = (ui8*)(*evChunkWrite->PartsPtr)[partIdx].first;
-            if (data) {
-                ui8 *source = data + evChunkWrite->CurrentPartOffset;
-                writer.WriteData(source, sizeToWrite, evChunkWrite->ReqId, &traceId);
-                *Mon.BandwidthPChunkPayload += sizeToWrite;
+                            if (data) {
+                    ui8 *source = data + evChunkWrite->CurrentPartOffset;
+                    LOG_ERROR_S(*ActorSystem, NKikimrServices::BS_PDISK,
+                        "PDisk WRITE DEBUG: chunk=" << evChunkWrite->ChunkIdx
+                        << " offset=" << evChunkWrite->Offset + evChunkWrite->BytesWritten
+                        << " size=" << sizeToWrite
+                        << " data[0-7]=[ " << (int)source[0] << " " << (int)source[1] << " " << (int)source[2] << " " << (int)source[3] << " " << (int)source[4] << " " << (int)source[5] << " " << (int)source[6] << " " << (int)source[7] << " ]"
+                        << " SectorPayloadSize=" << Format.SectorPayloadSize());
+                    writer.WriteData(source, sizeToWrite, evChunkWrite->ReqId, &traceId);
+                    *Mon.BandwidthPChunkPayload += sizeToWrite;
             } else {
                 writer.WritePadding(sizeToWrite, evChunkWrite->ReqId, &traceId);
                 *Mon.BandwidthPChunkPadding += sizeToWrite;
@@ -1009,9 +1028,12 @@ TPDisk::EChunkReadPieceResult TPDisk::ChunkReadPiece(TIntrusivePtr<TChunkRead> &
 
     ui64 firstSector;
     ui64 lastSector;
+    bool isRawChunk = ChunkState[read->ChunkIdx].IsRawChunk;
     ui64 sectorOffset;
+
+    // Use ParseSectorOffset with isRawChunk flag for both raw and normal chunks
     bool isOk = ParseSectorOffset(Format, ActorSystem, PDiskId,
-            read->Offset, read->Size, firstSector, lastSector, sectorOffset);
+            read->Offset, read->Size, firstSector, lastSector, sectorOffset, isRawChunk);
     Y_ABORT_UNLESS(isOk);
 
     ui64 currentSectorOffset = (ui64)read->CurrentSector * (ui64)Format.SectorSize;
@@ -1021,7 +1043,7 @@ TPDisk::EChunkReadPieceResult TPDisk::ChunkReadPiece(TIntrusivePtr<TChunkRead> &
     ui64 payloadBytesToRead;
     ui64 payloadOffset;
     ParsePayloadFromSectorOffset(Format, read->FirstSector, read->FirstSector + read->CurrentSector + sectorsToRead - 1,
-            read->FirstSector + read->CurrentSector, &payloadBytesToRead, &payloadOffset);
+            read->FirstSector + read->CurrentSector, &payloadBytesToRead, &payloadOffset, isRawChunk);
 
     if (!isTheFirstPart) {
         payloadOffset -= sectorOffset;
@@ -1310,7 +1332,7 @@ void TPDisk::ChunkUnlock(TChunkUnlock &evChunkUnlock) {
 // Chunk reservation
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-TVector<TChunkIdx> TPDisk::AllocateChunkForOwner(const TRequestBase *req, const ui32 count, TString &errorReason) {
+TVector<TChunkIdx> TPDisk::AllocateChunkForOwner(const TRequestBase *req, const ui32 count, TString &errorReason, bool useRawChunk) {
     // chunkIdx = 0 is deprecated and will not be soon removed
     TGuard<TMutex> guard(StateMutex);
     Y_DEBUG_ABORT_UNLESS(IsOwnerUser(req->Owner));
@@ -1363,9 +1385,10 @@ TVector<TChunkIdx> TPDisk::AllocateChunkForOwner(const TRequestBase *req, const 
         state.Nonce = chunkNonce;
         state.CurrentNonce = chunkNonce;
         LOG_INFO_S(*ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# " << PDiskId << " chunkIdx# " << chunkIdx <<
-                " allocated, ownerId# " << state.OwnerId << " -> " << req->Owner);
+                " allocated, ownerId# " << state.OwnerId << " -> " << req->Owner << " rawChunk# " << useRawChunk);
         state.OwnerId = req->Owner;
         state.CommitState = TChunkState::DATA_RESERVED;
+        state.IsRawChunk = useRawChunk;  // Set raw chunk flag during allocation
         Mon.UncommitedDataChunks->Inc();
     }
     return chunks;
@@ -1377,7 +1400,7 @@ void TPDisk::ChunkReserve(TChunkReserve &evChunkReserve) {
 
     THolder<NPDisk::TEvChunkReserveResult> result;
     TString allocateError;
-    TVector<TChunkIdx> chunks = AllocateChunkForOwner(&evChunkReserve, evChunkReserve.SizeChunks, allocateError);
+    TVector<TChunkIdx> chunks = AllocateChunkForOwner(&evChunkReserve, evChunkReserve.SizeChunks, allocateError, evChunkReserve.UseRawChunk);
     errorReason << allocateError;
 
     if (chunks.empty()) {
@@ -2872,8 +2895,8 @@ bool TPDisk::PreprocessRequest(TRequestBase *request) {
             }
             ui64 offset = 0;
             if (!ParseSectorOffset(Format, ActorSystem, PDiskId, read->Offset, read->Size,
-                        read->FirstSector, read->LastSector, offset)) {
-                err << "invalid size# " << read->Size << " and offset# " << read->Offset;
+                        read->FirstSector, read->LastSector, offset, state.IsRawChunk)) {
+                err << "invalid size# " << read->Size << " and offset# " << read->Offset << " isRawChunk# " << (state.IsRawChunk ? "true" : "false");
                 SendChunkReadError(read, err, NKikimrProto::ERROR);
                 return false;
             }
@@ -2928,7 +2951,7 @@ bool TPDisk::PreprocessRequest(TRequestBase *request) {
             }
             if (ev.ChunkIdx == 0) {
                 TString allocError;
-                TVector<TChunkIdx> chunks = AllocateChunkForOwner(request, 1, allocError);
+                TVector<TChunkIdx> chunks = AllocateChunkForOwner(request, 1, allocError, false);
                  if (chunks.empty()) {
                      err << allocError;
                      SendChunkWriteError(ev, err.Str(), NKikimrProto::OUT_OF_SPACE);

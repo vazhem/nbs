@@ -92,6 +92,7 @@ public:
     std::atomic<TFirstUncommitted> FirstUncommitted = TFirstUncommitted(0, 0);
     ui64 RecordBytesLeft;
     ui64 DataMagic;
+    bool IsRawChunk;
     TDeque<TChunkIdxWithInfo> NextChunks;
     TLogChunkInfo *LogChunkInfo = nullptr;
 
@@ -117,13 +118,14 @@ public:
         , Format(format)
         , Nonce(nonce)
         , CurrentPosition(0)
-        , SectorBytesFree(format.SectorPayloadSize())
+        , SectorBytesFree(dataMagic == format.MagicRawChunk ? format.SectorSize : format.SectorPayloadSize())
         , SectorIdx(sectorIdx)
         , FirstSectorIdx(firstSectorIdx)
         , EndSectorIdx(endSectorIdx)
         , ChunkIdx(chunkIdx)
         , RecordBytesLeft(0)
         , DataMagic(dataMagic)
+        , IsRawChunk(dataMagic == format.MagicRawChunk)
         , LogChunkInfo(logChunkInfo)
         , Hash(useT1ha0Hasher)
         , UseT1ha0Hasher(useT1ha0Hasher)
@@ -243,7 +245,7 @@ public:
     }
 
     void Obliterate() {
-        SectorBytesFree = Format.SectorPayloadSize();
+        SectorBytesFree = IsRawChunk ? Format.SectorSize : Format.SectorPayloadSize();
         BufferedWriter->Obliterate();
     }
 
@@ -262,10 +264,12 @@ public:
             for (ui32 replica = 1; replica < ReplicationFactor; ++replica) {
                 ui8 *sectorData = BufferedWriter->Get() + Format.SectorSize * replica;
                 memcpy(sectorData, BufferedWriter->Get(), Format.SectorSize);
-                // Check sector CRC
-                const ui64 sectorHash = *(ui64*)(void*)(sectorData + Format.SectorSize - sizeof(ui64));
-                Y_ABORT_UNLESS(Hash.CheckSectorHash(sectorOffset, dataMagic, sectorData, Format.SectorSize, sectorHash),
-                        "Sector hash corruption detected!");
+                // Check sector CRC only for non-raw chunks (raw chunks don't have footers/hashes)
+                if (!IsRawChunk) {
+                    const ui64 sectorHash = *(ui64*)(void*)(sectorData + Format.SectorSize - sizeof(ui64));
+                    Y_ABORT_UNLESS(Hash.CheckSectorHash(sectorOffset, dataMagic, sectorData, Format.SectorSize, sectorHash),
+                            "Sector hash corruption detected!");
+                }
             }
             BufferedWriter->MarkDirty();
             reserve = ReplicationFactor;
@@ -354,7 +358,12 @@ public:
 
     void Write(const void* data, ui64 size, TReqId reqId, NWilson::TTraceId *traceId) {
         Y_ABORT_UNLESS(data != nullptr);
-        Cypher.Encrypt(BufferedWriter->Get() + CurrentPosition, data, (ui32)size);
+        if (!IsRawChunk) {
+            Cypher.Encrypt(BufferedWriter->Get() + CurrentPosition, data, (ui32)size);
+        } else {
+            // For raw chunks, copy data directly without encryption
+            memcpy(BufferedWriter->Get() + CurrentPosition, data, (ui32)size);
+        }
         FinalizeWrite(size, reqId, traceId);
     }
 
@@ -506,9 +515,11 @@ protected:
             BufferedWriter->MarkDirty();
         }
         if (SectorBytesFree == 0) {
-            Cypher.Encrypt(BufferedWriter->Get() + CurrentPosition, &Canary, CanarySize);
-            ui64 sectorOffset = Format.Offset(ChunkIdx, SectorIdx);
-            PrepareDataSectorFooter(BufferedWriter->Get(), DataMagic, sectorOffset);
+            if (!IsRawChunk) {
+                Cypher.Encrypt(BufferedWriter->Get() + CurrentPosition, &Canary, CanarySize);
+                ui64 sectorOffset = Format.Offset(ChunkIdx, SectorIdx);
+                PrepareDataSectorFooter(BufferedWriter->Get(), DataMagic, sectorOffset);
+            }
             if (IsLog) {
                 if (IsSysLog) {
                     *Mon.BandwidthPSysLogSectorFooter += sizeof(TDataSectorFooter);
@@ -521,7 +532,7 @@ protected:
             CurrentPosition = 0;
             NextSector(DataMagic, reqId, traceId);
 
-            SectorBytesFree = Format.SectorPayloadSize();
+            SectorBytesFree = IsRawChunk ? Format.SectorSize : Format.SectorPayloadSize();
             CurrentPosition = 0;
         }
     }

@@ -255,7 +255,7 @@ void TestOffset(ui64 offset, ui64 size, ui64 expectedFirstSector, ui64 expectedL
     ui64 firstSector;
     ui64 lastSector;
     ui64 sectorOffset;
-    bool isOk = ParseSectorOffset(format, nullptr, 0, offset, size, firstSector, lastSector, sectorOffset);
+    bool isOk = ParseSectorOffset(format, nullptr, 0, offset, size, firstSector, lastSector, sectorOffset, false);
     UNIT_ASSERT_C(isOk && firstSector == expectedFirstSector && lastSector == expectedLastSector &&
             sectorOffset == expectedSectorOffset,
             "isOk# " << isOk << "\n"
