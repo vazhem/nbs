@@ -82,13 +82,13 @@ struct TTxPartitionDirect
     {
         using TArgs = TSaveGroupInfo;
 
-        ui32 GroupId;
-        TVector<TPartitionDirectDatabase::TDDiskInfo> DDiskInfos;
+        TVector<TPartitionDirectDatabase::TGroupInfo> GroupInfos;  // Multiple groups for striping
+        TVector<TPartitionDirectDatabase::TGroupInfo> ExistingGroupsToDelete;  // For prepare phase
 
         void Clear()
         {
-            GroupId = 0;
-            DDiskInfos.clear();
+            GroupInfos.clear();
+            ExistingGroupsToDelete.clear();
         }
     };
 

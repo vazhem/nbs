@@ -392,68 +392,90 @@ bool TPartitionActor::ProcessGroupConfiguration(
     const ui64 boxId = 1;  // Our storage pool uses BoxId=1
     const ui64 storagePoolId = State->GetStoragePoolId();
 
-    // Find our group
-    const NKikimrBlobStorage::TBaseConfig::TGroup* targetGroup = nullptr;
+    // Find all our groups
+    TVector<const NKikimrBlobStorage::TBaseConfig::TGroup*> targetGroups;
     for (const auto& group : baseConfig.GetGroup()) {
         if (group.GetBoxId() == boxId &&
             (storagePoolId == 0 || group.GetStoragePoolId() == storagePoolId)) {
-            targetGroup = &group;
-            break;
+
+            // Verify this is a Mirror3Direct group
+            const auto& erasureSpecies = group.GetErasureSpecies();
+            if (erasureSpecies != "mirror-3-direct") {
+                LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+                    "[" << TabletID() << "] Group " << group.GetGroupId()
+                    << " is not mirror-3-direct, species: " << erasureSpecies);
+                continue;
+            }
+
+            LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+                "[" << TabletID() << "] Accepting group " << group.GetGroupId()
+                << " with species: " << erasureSpecies);
+
+            targetGroups.push_back(&group);
         }
     }
 
-    if (!targetGroup) {
+    if (targetGroups.empty()) {
         LOG_WARN_S(ctx, TBlockStoreComponents::PARTITION,
-            "[" << TabletID() << "] No groups found for BoxId: " << boxId
+            "[" << TabletID() << "] No BlockShardGroups found for BoxId: " << boxId
             << ", StoragePoolId: " << storagePoolId);
         return false;
     }
 
-    // Verify this is a Mirror3Direct group
-    const auto& erasureSpecies = targetGroup->GetErasureSpecies();
-    if (erasureSpecies != "mirror-3-direct") {
-        LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
-            "[" << TabletID() << "] Group " << targetGroup->GetGroupId()
-            << " is not mirror-3-direct, species: " << erasureSpecies);
-        return false;
+    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Found " << targetGroups.size()
+        << " BlockShardGroups for striped storage");
+
+    // Extract DDisk information from all groups
+    TVector<TPartitionDirectDatabase::TGroupInfo> groupInfos;
+    ui32 totalDDisks = 0;
+
+    for (ui32 groupIndex = 0; groupIndex < targetGroups.size(); ++groupIndex) {
+        const auto* group = targetGroups[groupIndex];
+        ui32 virtualGroupId = group->GetGroupId();
+
+        TPartitionDirectDatabase::TGroupInfo groupInfo;
+        groupInfo.GroupId = virtualGroupId;
+        groupInfo.GroupIndex = groupIndex;  // For striping order
+
+        // Extract DDisk information from VSlots for this group
+        for (ui32 i = 0; i < group->VSlotIdSize(); ++i) {
+            const auto& vslot = group->GetVSlotId(i);
+
+            TPartitionDirectDatabase::TDDiskInfo ddiskInfo;
+            ddiskInfo.NodeId = vslot.GetNodeId();
+            ddiskInfo.PDiskId = vslot.GetPDiskId();
+            ddiskInfo.VSlotId = vslot.GetVSlotId();
+            ddiskInfo.OrderInGroup = i;
+            ddiskInfo.GroupIndex = groupIndex;  // Associate DDisk with group
+
+            groupInfo.DDiskInfos.push_back(ddiskInfo);
+            totalDDisks++;
+
+            LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+                "[" << TabletID() << "] Group[" << groupIndex << "] DDisk[" << i << "] "
+                << " Node:" << ddiskInfo.NodeId
+                << " PDisk:" << ddiskInfo.PDiskId << " VSlot:" << ddiskInfo.VSlotId
+                << " ServiceId:" << MakeBlobStorageVDiskID(ddiskInfo.NodeId, ddiskInfo.PDiskId, ddiskInfo.VSlotId).ToString());
+        }
+
+        groupInfos.push_back(groupInfo);
     }
 
-    ui32 virtualGroupId = targetGroup->GetGroupId();
-
-    // Extract DDisk information from VSlots
-    TVector<TPartitionDirectDatabase::TDDiskInfo> ddiskInfos;
-    for (ui32 i = 0; i < targetGroup->VSlotIdSize(); ++i) {
-        const auto& vslot = targetGroup->GetVSlotId(i);
-
-        TPartitionDirectDatabase::TDDiskInfo info;
-        info.NodeId = vslot.GetNodeId();
-        info.PDiskId = vslot.GetPDiskId();
-        info.VSlotId = vslot.GetVSlotId();
-        info.OrderInGroup = i;
-
-        ddiskInfos.push_back(info);
-
-        LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
-            "[" << TabletID() << "] DDisk[" << i << "] Node:" << info.NodeId
-            << " PDisk:" << info.PDiskId << " VSlot:" << info.VSlotId
-            << " ServiceId:" << MakeBlobStorageVDiskID(info.NodeId, info.PDiskId, info.VSlotId).ToString());
-    }
-
-    // Create transaction to save everything
+    // Create transaction to save all groups
     TTxPartitionDirect::TSaveGroupInfo args;
-    args.GroupId = virtualGroupId;
-    args.DDiskInfos = ddiskInfos;
+    args.GroupInfos = groupInfos;
     ExecuteTx<TSaveGroupInfo>(ctx, args);
 
     LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
-        "[" << TabletID() << "] Successfully configured group " << virtualGroupId
-        << " with " << ddiskInfos.size() << " DDisk actors");
+        "[" << TabletID() << "] Successfully configured " << targetGroups.size()
+        << " BlockShardGroups with " << totalDDisks << " total DDisk actors");
 
     return true;
 }
 
 TString TPartitionActor::GetStoragePoolName() {
-    return Sprintf("partition_direct_pool_%lu", TabletID());
+    return "BlockShardGroups";
 }
 
 void TPartitionActor::RequestStoragePoolGroups(
@@ -529,6 +551,12 @@ bool TPartitionActor::PrepareLoadState(
         LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
             "[" << TabletID() << "] Loaded " << args.DDiskInfos.size()
             << " DDisk actors from database");
+    } else if (!hasDDiskInfos && args.VirtualGroupId != 0) {
+        // ReadDDiskInfos returned false but VirtualGroupId exists - indicates bad data
+        LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Invalid DDisk data detected in database, will force rebuild");
+        // Clear the VirtualGroupId to force group recreation
+        args.VirtualGroupId = 0;
     } else {
         LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
             "[" << TabletID() << "] No DDisk information found in database");
@@ -614,7 +642,8 @@ void TPartitionActor::CompleteLoadState(
                 dbInfo.NodeId,
                 dbInfo.PDiskId,
                 dbInfo.VSlotId,
-                dbInfo.OrderInGroup
+                dbInfo.OrderInGroup,
+                dbInfo.GroupIndex
             );
         }
 
@@ -679,7 +708,9 @@ void TPartitionActor::CompleteLoadState(
     } else {
         // Check if we need more chunks for full volume
         ui64 volumeSize = static_cast<ui64>(State->GetBlockSize()) * State->GetBlockCount();
-        ui64 totalRegionsNeeded = (volumeSize + args.ChunkSize - 1) / args.ChunkSize;
+        ui64 volumeRegionsNeeded = (volumeSize + args.ChunkSize - 1) / args.ChunkSize;
+        // Ensure at least one chunk per group for striping (32 groups)
+        ui64 totalRegionsNeeded = std::max(volumeRegionsNeeded, static_cast<ui64>(State->MAX_GROUPS));
         ui32 currentRegionCount = State->GetChunkRegionCacheSize();
 
         if (currentRegionCount < totalRegionsNeeded) {
@@ -711,12 +742,12 @@ void TPartitionActor::CheckAndCreateVirtualGroup(const NActors::TActorContext& c
     auto* command = request->Record.MutableRequest()->AddCommand();
     auto* defineStoragePool = command->MutableDefineStoragePool();
 
-    // Настраиваем storage pool для DDisk акторов
+    // Настраиваем storage pool для DDisk акторов с 32 группами для striping
     defineStoragePool->SetBoxId(1);
-    defineStoragePool->SetName(GetStoragePoolName());
+    defineStoragePool->SetName("BlockShardGroups");
     defineStoragePool->SetErasureSpecies("mirror-3-direct");
     defineStoragePool->SetVDiskKind("Default");
-    defineStoragePool->SetNumGroups(1);
+    defineStoragePool->SetNumGroups(3);  // Create 3 groups (limited by available PDisk resources in test environment)
 
     // Настраиваем фильтр дисков
     auto* pdiskFilter = defineStoragePool->AddPDiskFilter();
@@ -742,7 +773,7 @@ void TPartitionActor::CheckAndCreateVirtualGroup(const NActors::TActorContext& c
 
     LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
         "[" << TabletID() << "]"
-        << " Sent request to create virtual group mirror-3-direct");
+        << " Sent request to create 32 BlockShardGroups for striped storage");
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -924,8 +955,15 @@ bool TPartitionActor::PrepareSaveGroupInfo(
     TTxPartitionDirect::TSaveGroupInfo& args)
 {
     Y_UNUSED(ctx);
-    Y_UNUSED(tx);
-    Y_UNUSED(args);
+
+    TPartitionDirectDatabase db(tx.DB);
+
+    // Read existing groups and DDisk info to prepare for deletion
+    TVector<TPartitionDirectDatabase::TGroupInfo> existingGroups;
+    db.ReadGroupInfos(existingGroups);
+
+    // Store existing data for deletion in Execute phase
+    args.ExistingGroupsToDelete = std::move(existingGroups);
 
     return true;
 }
@@ -939,37 +977,46 @@ void TPartitionActor::ExecuteSaveGroupInfo(
 
     TPartitionDirectDatabase db(tx.DB);
 
-    // Write virtual group ID
-    db.WriteVirtualGroupId(args.GroupId);
+    // Write the first group's ID as the virtual group ID for compatibility
+    if (!args.GroupInfos.empty()) {
+        db.WriteVirtualGroupId(args.GroupInfos[0].GroupId);
+    }
 
-    // Write DDisk information
-    db.WriteDDiskInfos(args.DDiskInfos);
+    // Write all group and DDisk information
+    db.WriteGroupInfos(args.GroupInfos, args.ExistingGroupsToDelete);
 }
 
 void TPartitionActor::CompleteSaveGroupInfo(
     const NActors::TActorContext& ctx,
     TTxPartitionDirect::TSaveGroupInfo& args)
 {
-    // Update in-memory state with DDisk information
-    TVector<TDDiskInfo> ddiskInfos;
-    ddiskInfos.reserve(args.DDiskInfos.size());
+    // Update in-memory state with all group and DDisk information
+    TVector<TDDiskInfo> allDDiskInfos;
+    ui32 totalDDisks = 0;
 
-    for (const auto& dbInfo : args.DDiskInfos) {
-        ddiskInfos.emplace_back(
-            dbInfo.NodeId,
-            dbInfo.PDiskId,
-            dbInfo.VSlotId,
-            dbInfo.OrderInGroup
-        );
+    for (const auto& groupInfo : args.GroupInfos) {
+        for (const auto& dbInfo : groupInfo.DDiskInfos) {
+            allDDiskInfos.emplace_back(
+                dbInfo.NodeId,
+                dbInfo.PDiskId,
+                dbInfo.VSlotId,
+                dbInfo.OrderInGroup,
+                dbInfo.GroupIndex  // Include group index for striping
+            );
+            totalDDisks++;
+        }
     }
 
-    State->SetDDiskInfos(ddiskInfos);
-    State->SetVirtualGroupId(args.GroupId);
+    State->SetDDiskInfos(allDDiskInfos);
+
+    // Set the first group's ID as the virtual group ID for compatibility
+    if (!args.GroupInfos.empty()) {
+        State->SetVirtualGroupId(args.GroupInfos[0].GroupId);
+    }
 
     LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
-        "[" << TabletID() << "]"
-        << " SaveGroupInfo transaction completed for GroupId: " << args.GroupId
-        << " with " << ddiskInfos.size() << " DDisk actors");
+        "[" << TabletID() << "] SaveGroupInfo transaction completed for "
+        << args.GroupInfos.size() << " BlockShardGroups with " << totalDDisks << " DDisk actors");
 
     // State machine: after group creation, move to GetChunkSize
     if (CurrentState == EPartitionState::CreateDDiskGroups) {
@@ -1159,7 +1206,9 @@ void TPartitionActor::RequestAllVolumeChunks(const NActors::TActorContext& ctx)
 
     // Calculate total volume size and required chunks
     ui64 volumeSize = static_cast<ui64>(State->GetBlockSize()) * State->GetBlockCount();
-    ui64 totalChunksNeeded = (volumeSize + chunkSize - 1) / chunkSize;  // Round up
+    ui64 volumeChunksNeeded = (volumeSize + chunkSize - 1) / chunkSize;  // Round up
+    // Ensure at least one chunk per group for striping (32 groups)
+    ui64 totalChunksNeeded = std::max(volumeChunksNeeded, static_cast<ui64>(State->MAX_GROUPS));
     ui32 ddiskCount = static_cast<ui32>(ddiskServiceIds.size());
     ui32 chunksPerDDisk = static_cast<ui32>((totalChunksNeeded + ddiskCount - 1) / ddiskCount);  // Round up
 
@@ -1167,6 +1216,7 @@ void TPartitionActor::RequestAllVolumeChunks(const NActors::TActorContext& ctx)
         "[" << TabletID() << "] Pre-allocating ALL chunks for volume: "
         << " VolumeSize=" << volumeSize << " bytes"
         << " ChunkSize=" << chunkSize << " bytes"
+        << " VolumeChunks=" << volumeChunksNeeded
         << " TotalChunks=" << totalChunksNeeded
         << " DDisks=" << ddiskCount
         << " ChunksPerDDisk=" << chunksPerDDisk);
@@ -1455,7 +1505,9 @@ void TPartitionActor::CompletePreallocateVolumeChunks(
     // Check if all DDisks have completed their pre-allocation
     ui32 chunkSize = State->GetChunkSize();
     ui64 volumeSize = static_cast<ui64>(State->GetBlockSize()) * State->GetBlockCount();
-    ui64 totalRegionsNeeded = (volumeSize + chunkSize - 1) / chunkSize;  // Round up
+    ui64 volumeRegionsNeeded = (volumeSize + chunkSize - 1) / chunkSize;  // Round up
+    // Ensure at least one chunk per group for striping (32 groups)
+    ui64 totalRegionsNeeded = std::max(volumeRegionsNeeded, static_cast<ui64>(State->MAX_GROUPS));
     ui32 currentRegionCount = State->GetChunkRegionCacheSize();
 
     if (currentRegionCount >= totalRegionsNeeded) {

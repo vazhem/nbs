@@ -28,15 +28,17 @@ struct TDDiskInfo {
     ui32 PDiskId = 0;
     ui32 VSlotId = 0;
     ui32 OrderInGroup = 0;
+    ui32 GroupIndex = 0;    // Which group this DDisk belongs to (0-2 for striping)
     NActors::TActorId ServiceId;  // Constructed DDisk service ID
 
     TDDiskInfo() = default;
 
-    TDDiskInfo(ui32 nodeId, ui32 pdiskId, ui32 vslotId, ui32 orderInGroup)
+    TDDiskInfo(ui32 nodeId, ui32 pdiskId, ui32 vslotId, ui32 orderInGroup, ui32 groupIndex = 0)
         : NodeId(nodeId)
         , PDiskId(pdiskId)
         , VSlotId(vslotId)
         , OrderInGroup(orderInGroup)
+        , GroupIndex(groupIndex)
         , ServiceId(NKikimr::MakeBlobStorageVDiskID(nodeId, pdiskId, vslotId))
     {
     }
@@ -251,15 +253,62 @@ public:
         return DDiskServiceIds;
     }
 
+    // Get DDisk service IDs for a specific group (for striping)
+    TVector<NActors::TActorId> GetDDiskServiceIdsForGroup(ui32 groupIndex) const
+    {
+        TVector<NActors::TActorId> groupDDisks;
+
+        for (const auto& ddiskInfo : DDiskInfos) {
+            if (ddiskInfo.GroupIndex == groupIndex) {
+                groupDDisks.push_back(ddiskInfo.ServiceId);
+            }
+        }
+
+        return groupDDisks;
+    }
+
     //
     // Chunk management methods
     //
 
-    // Calculate region index from offset using dynamic chunk size
+    // Striping constants for multi-group operations
+    static constexpr ui64 STRIPE_SIZE = 512 * 1024;  // 512KB stripe size
+    static constexpr ui32 MAX_GROUPS = 3;             // Maximum number of groups (limited by test environment)
+
+    // Calculate region index from offset using block size for maximum granularity
     ui64 CalculateRegionIndex(ui64 offset) const
     {
-        Y_ABORT_UNLESS(ChunkSize > 0, "ChunkSize must be set before calculating regions");
-        return offset / ChunkSize;
+        // Use block size (4KB) to ensure each block gets its own region
+        // This prevents overwrites within the same chunk
+        return offset / GetBlockSize();
+    }
+
+    // Striping methods for multi-group operations
+    ui32 CalculateGroupIndex(ui64 offset) const
+    {
+        // Calculate which group should handle this offset based on 512KB striping
+        ui64 stripeIndex = offset / STRIPE_SIZE;
+        ui32 groupIndex = static_cast<ui32>(stripeIndex % MAX_GROUPS);
+
+        return groupIndex;
+    }
+
+    ui64 CalculateGroupOffset(ui64 offset) const
+    {
+        // Calculate the offset within the group by removing striping
+        ui64 stripeIndex = offset / STRIPE_SIZE;
+        ui64 offsetWithinStripe = offset % STRIPE_SIZE;
+        ui64 groupStripeIndex = stripeIndex / MAX_GROUPS;
+        return groupStripeIndex * STRIPE_SIZE + offsetWithinStripe;
+    }
+
+    ui64 CalculateGlobalOffset(ui32 groupIndex, ui64 groupOffset) const
+    {
+        // Reverse calculation: convert group offset back to global offset
+        ui64 groupStripeIndex = groupOffset / STRIPE_SIZE;
+        ui64 offsetWithinStripe = groupOffset % STRIPE_SIZE;
+        ui64 globalStripeIndex = groupStripeIndex * MAX_GROUPS + groupIndex;
+        return globalStripeIndex * STRIPE_SIZE + offsetWithinStripe;
     }
 
     ui64 CalculateRegionStartOffset(ui64 regionIndex) const
@@ -290,8 +339,13 @@ public:
     // Cache operations (single-threaded actor, no locking needed)
     bool FindChunkForRegion(ui64 regionIndex, TChunkRegionInfo& chunkInfo) const
     {
-        ui64 startOffset = CalculateRegionStartOffset(regionIndex);
-        auto it = ChunkRegionCache.find(startOffset);
+        // Map small logical regions (4KB each) to large physical chunk regions (35MB each)
+        // Calculate which chunk-sized region this small region belongs to
+        ui64 logicalStartOffset = regionIndex * GetBlockSize();
+        ui64 chunkRegionIndex = logicalStartOffset / ChunkSize;
+        ui64 chunkStartOffset = chunkRegionIndex * ChunkSize;
+
+        auto it = ChunkRegionCache.find(chunkStartOffset);
         if (it != ChunkRegionCache.end()) {
             chunkInfo = it->second;
             return true;

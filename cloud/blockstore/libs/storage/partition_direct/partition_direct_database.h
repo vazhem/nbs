@@ -39,16 +39,28 @@ public:
     bool ReadChunkSize(ui32& chunkSize);
 
     //
-    // DDisk Information
+    // Group and DDisk Information (Multi-Group Support)
     //
 
     struct TDDiskInfo {
-        ui32 NodeId;
-        ui32 PDiskId;
-        ui32 VSlotId;
-        ui32 OrderInGroup;
+        ui32 NodeId = 0;
+        ui32 PDiskId = 0;
+        ui32 VSlotId = 0;
+        ui32 OrderInGroup = 0;
+        ui32 GroupIndex = 0;    // Which group this DDisk belongs to (0-2 for striping)
     };
 
+    struct TGroupInfo {
+        ui32 GroupId;       // Virtual Group ID from BSController
+        ui32 GroupIndex;    // Striping order
+        TVector<TDDiskInfo> DDiskInfos;  // DDisks in this group
+    };
+
+    void WriteGroupInfos(const TVector<TGroupInfo>& groupInfos, const TVector<TGroupInfo>& existingGroupsToDelete = {});
+    bool ReadGroupInfos(TVector<TGroupInfo>& groupInfos);
+    void ClearGroupInfos();
+
+    // Legacy methods for backward compatibility (will use first group)
     void WriteDDiskInfos(const TVector<TDDiskInfo>& ddiskInfos);
     bool ReadDDiskInfos(TVector<TDDiskInfo>& ddiskInfos);
     void ClearDDiskInfos();

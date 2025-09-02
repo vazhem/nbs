@@ -64,8 +64,38 @@ struct TPartitionDirectSchema
         using StoragePolicy = TStoragePolicy<0>;  // System channel
     };
 
-    struct DDiskInfo
+    //
+    // Groups table - stores information about all BlockShardGroups
+    //
+    struct Groups
         : public TTableSchema<3>
+    {
+        struct GroupIndex
+            : public Column<1, NKikimr::NScheme::NTypeIds::Uint32>
+        {
+        };
+
+        struct GroupId
+            : public Column<2, NKikimr::NScheme::NTypeIds::Uint32>
+        {
+        };
+
+        struct GroupName
+            : public Column<3, NKikimr::NScheme::NTypeIds::Utf8>
+        {
+        };
+
+        using TKey = TableKey<GroupIndex>;
+        using TColumns = TableColumns<
+            GroupIndex,
+            GroupId,
+            GroupName>;
+
+        using StoragePolicy = TStoragePolicy<0>;  // System channel
+    };
+
+    struct DDiskInfo
+        : public TTableSchema<6>
     {
         struct Id
             : public Column<1, NKikimr::NScheme::NTypeIds::Uint32>
@@ -92,13 +122,19 @@ struct TPartitionDirectSchema
         {
         };
 
+        struct GroupIndex
+            : public Column<6, NKikimr::NScheme::NTypeIds::Uint32>
+        {
+        };
+
         using TKey = TableKey<Id>;
         using TColumns = TableColumns<
             Id,
             NodeId,
             PDiskId,
             VSlotId,
-            OrderInGroup>;
+            OrderInGroup,
+            GroupIndex>;
 
         using StoragePolicy = TStoragePolicy<0>;  // System channel
     };
@@ -166,6 +202,7 @@ struct TPartitionDirectSchema
     using TTables = SchemaTables<
         Meta,
         VirtualGroup,
+        Groups,
         DDiskInfo,
         AvailableChunks,
         ChunkRegions

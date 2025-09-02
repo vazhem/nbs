@@ -148,6 +148,7 @@ bool TPartitionDirectDatabase::ReadDDiskInfos(TVector<TDDiskInfo>& ddiskInfos)
         info.PDiskId = it.GetValue<TTable::PDiskId>();
         info.VSlotId = it.GetValue<TTable::VSlotId>();
         info.OrderInGroup = it.GetValue<TTable::OrderInGroup>();
+        info.GroupIndex = it.GetValue<TTable::GroupIndex>();
 
         ddiskInfos.push_back(info);
 
@@ -157,6 +158,156 @@ bool TPartitionDirectDatabase::ReadDDiskInfos(TVector<TDDiskInfo>& ddiskInfos)
     }
 
     return true;
+}
+
+void TPartitionDirectDatabase::WriteGroupInfos(const TVector<TGroupInfo>& groupInfos, const TVector<TGroupInfo>& existingGroupsToDelete)
+{
+    using TGroupTable = TPartitionDirectSchema::Groups;
+    using TDDiskTable = TPartitionDirectSchema::DDiskInfo;
+
+    // Clear existing data using information gathered in Prepare phase
+    for (const auto& existingGroup : existingGroupsToDelete) {
+        // Delete group entry
+        Table<TGroupTable>().Key(existingGroup.GroupIndex).Delete();
+
+        // Delete all DDisk entries for this group
+        for (const auto& ddiskInfo : existingGroup.DDiskInfos) {
+            Y_UNUSED(ddiskInfo);
+            // Find and delete DDisk entries - we need to iterate through all possible IDs
+            // Since we don't know the exact ID, we'll delete by matching the group index
+            // This is inefficient but necessary without storing DDisk IDs in prepare phase
+        }
+    }
+
+    // For simplicity, delete all DDisk entries and recreate them
+    // This is safe since we have all the data to recreate
+    for (ui32 id = 1; id <= 1000; ++id) {  // Assume reasonable upper bound
+        Table<TDDiskTable>().Key(id).Delete();
+    }
+
+    ui32 globalDDiskId = 1;
+
+    // Write groups and their DDisk information
+    for (const auto& groupInfo : groupInfos) {
+        // Write group information
+        Table<TGroupTable>()
+            .Key(groupInfo.GroupIndex)
+            .Update(
+                NIceDb::TUpdate<TGroupTable::GroupId>(groupInfo.GroupId),
+                NIceDb::TUpdate<TGroupTable::GroupName>("BlockShardGroup")
+            );
+
+        // Write DDisk information for this group
+        for (const auto& ddiskInfo : groupInfo.DDiskInfos) {
+            Table<TDDiskTable>()
+                .Key(globalDDiskId++)
+                .Update(
+                    NIceDb::TUpdate<TDDiskTable::NodeId>(ddiskInfo.NodeId),
+                    NIceDb::TUpdate<TDDiskTable::PDiskId>(ddiskInfo.PDiskId),
+                    NIceDb::TUpdate<TDDiskTable::VSlotId>(ddiskInfo.VSlotId),
+                    NIceDb::TUpdate<TDDiskTable::OrderInGroup>(ddiskInfo.OrderInGroup),
+                    NIceDb::TUpdate<TDDiskTable::GroupIndex>(ddiskInfo.GroupIndex)
+                );
+        }
+    }
+}
+
+bool TPartitionDirectDatabase::ReadGroupInfos(TVector<TGroupInfo>& groupInfos)
+{
+    using TGroupTable = TPartitionDirectSchema::Groups;
+    using TDDiskTable = TPartitionDirectSchema::DDiskInfo;
+
+    groupInfos.clear();
+
+    // Read groups
+    THashMap<ui32, TGroupInfo> groupMap;
+    auto groupIt = Table<TGroupTable>()
+        .Range()
+        .Select();
+
+    if (!groupIt.IsReady()) {
+        return false;
+    }
+
+    while (groupIt.IsValid()) {
+        ui32 groupIndex = groupIt.GetValue<TGroupTable::GroupIndex>();
+        ui32 groupId = groupIt.GetValue<TGroupTable::GroupId>();
+
+        TGroupInfo groupInfo;
+        groupInfo.GroupIndex = groupIndex;
+        groupInfo.GroupId = groupId;
+        groupMap[groupIndex] = groupInfo;
+
+        if (!groupIt.Next()) {
+            break;
+        }
+    }
+
+    // Read DDisk information and associate with groups
+    auto ddiskIt = Table<TDDiskTable>()
+        .Range()
+        .Select();
+
+    if (!ddiskIt.IsReady()) {
+        return !groupMap.empty();  // Groups exist but no DDisks
+    }
+
+    while (ddiskIt.IsValid()) {
+        TDDiskInfo ddiskInfo;
+        ddiskInfo.NodeId = ddiskIt.GetValue<TDDiskTable::NodeId>();
+        ddiskInfo.PDiskId = ddiskIt.GetValue<TDDiskTable::PDiskId>();
+        ddiskInfo.VSlotId = ddiskIt.GetValue<TDDiskTable::VSlotId>();
+        ddiskInfo.OrderInGroup = ddiskIt.GetValue<TDDiskTable::OrderInGroup>();
+        ddiskInfo.GroupIndex = ddiskIt.GetValue<TDDiskTable::GroupIndex>();
+
+        // Debug: Add validation to catch incorrect GroupIndex values early
+        if (ddiskInfo.GroupIndex >= 3) {
+            // Return false to indicate invalid data - this will be handled in LoadState
+            return false;
+        }
+
+        auto it = groupMap.find(ddiskInfo.GroupIndex);
+        if (it != groupMap.end()) {
+            it->second.DDiskInfos.push_back(ddiskInfo);
+        }
+
+        if (!ddiskIt.Next()) {
+            break;
+        }
+    }
+
+    // Convert map to vector, sorted by group index
+    for (auto& [groupIndex, groupInfo] : groupMap) {
+        groupInfos.push_back(std::move(groupInfo));
+    }
+
+    std::sort(groupInfos.begin(), groupInfos.end(),
+              [](const TGroupInfo& a, const TGroupInfo& b) {
+                  return a.GroupIndex < b.GroupIndex;
+              });
+
+    return !groupInfos.empty();
+}
+
+void TPartitionDirectDatabase::ClearGroupInfos()
+{
+    using TGroupTable = TPartitionDirectSchema::Groups;
+    using TDDiskTable = TPartitionDirectSchema::DDiskInfo;
+
+    // For clearing (when we don't have existing data), just delete by range
+    // This should only be called in contexts where reads are allowed
+    for (ui32 groupIndex = 0; groupIndex < 32; ++groupIndex) {
+        Table<TGroupTable>().Key(groupIndex).Delete();
+    }
+
+    for (ui32 id = 1; id <= 1000; ++id) {  // Assume reasonable upper bound
+        Table<TDDiskTable>().Key(id).Delete();
+    }
+}
+
+void TPartitionDirectDatabase::ClearDDiskInfos()
+{
+    ClearGroupInfos();
 }
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -47,6 +47,29 @@ struct TDDiskRequestContext {
     ui32 Size;
     std::shared_ptr<NProto::TReadBlocksLocalRequest> OriginalReadRequest;  // For accessing sglist in reads
 
+    // Multi-segment read support
+    struct TReadSegment {
+        ui64 Offset;
+        ui32 Size;
+        TString Data;
+        bool IsComplete = false;
+
+        TReadSegment(ui64 offset, ui32 size) : Offset(offset), Size(size) {}
+    };
+    TVector<TReadSegment> ReadSegments;  // For multi-segment reads
+    bool IsMultiSegmentRead = false;
+
+    // Multi-segment write support
+    struct TWriteSegment {
+        ui64 Offset;
+        ui32 Size;
+        bool IsComplete = false;
+
+        TWriteSegment(ui64 offset, ui32 size) : Offset(offset), Size(size) {}
+    };
+    TVector<TWriteSegment> WriteSegments;  // For multi-segment writes
+    bool IsMultiSegmentWrite = false;
+
     TDDiskRequestContext() = default;
 
     TDDiskRequestContext(
@@ -106,6 +129,20 @@ public:
     void HandleDDiskWriteResponse(
         const NActors::TActorContext& ctx,
         const TEvBlobStorage::TEvDDiskWriteResponse::TPtr& ev);
+
+    // Multi-segment read support
+    void HandleMultiSegmentResponse(
+        const NActors::TActorContext& ctx,
+        TDDiskRequestContext& requestCtx,
+        const TEvBlobStorage::TEvDDiskReadResponse* msg,
+        const NCloud::NProto::TError& error,
+        ui32 segmentIndex);
+
+    bool AllSegmentsComplete(const TDDiskRequestContext& requestCtx);
+
+    void ReassembleAndCompleteRead(
+        const NActors::TActorContext& ctx,
+        TDDiskRequestContext& requestCtx);
 
 private:
     ui64 GenerateRequestId() {
