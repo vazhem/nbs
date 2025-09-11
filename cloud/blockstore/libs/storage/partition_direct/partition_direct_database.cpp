@@ -260,12 +260,6 @@ bool TPartitionDirectDatabase::ReadGroupInfos(TVector<TGroupInfo>& groupInfos)
         ddiskInfo.OrderInGroup = ddiskIt.GetValue<TDDiskTable::OrderInGroup>();
         ddiskInfo.GroupIndex = ddiskIt.GetValue<TDDiskTable::GroupIndex>();
 
-        // Debug: Add validation to catch incorrect GroupIndex values early
-        if (ddiskInfo.GroupIndex >= 3) {
-            // Return false to indicate invalid data - this will be handled in LoadState
-            return false;
-        }
-
         auto it = groupMap.find(ddiskInfo.GroupIndex);
         if (it != groupMap.end()) {
             it->second.DDiskInfos.push_back(ddiskInfo);
@@ -348,71 +342,6 @@ bool TPartitionDirectDatabase::ReadAvailableChunks(TVector<TAvailableChunk>& ava
         chunk.RegionIndex = it.GetValue<TTable::RegionIndex>();
 
         availableChunks.push_back(chunk);
-
-        if (!it.Next()) {
-            break;
-        }
-    }
-
-    return true;
-}
-
-void TPartitionDirectDatabase::WriteChunkRegion(ui64 startOffset, ui32 chunkId, const TString& ddiskServiceId)
-{
-    using TTable = TPartitionDirectSchema::ChunkRegions;
-
-    Table<TTable>()
-        .Key(startOffset)
-        .Update(
-            NIceDb::TUpdate<TTable::ChunkId>(chunkId),
-            NIceDb::TUpdate<TTable::DDiskServiceId>(ddiskServiceId)
-        );
-}
-
-bool TPartitionDirectDatabase::ReadChunkRegion(ui64 startOffset, TChunkRegion& chunkRegion)
-{
-    using TTable = TPartitionDirectSchema::ChunkRegions;
-
-    auto it = Table<TTable>()
-        .Key(startOffset)
-        .Select();
-
-    if (!it.IsReady()) {
-        return false;
-    }
-
-    if (!it.IsValid()) {
-        return false;  // No record found
-    }
-
-    chunkRegion.StartOffset = startOffset;
-    chunkRegion.ChunkId = it.GetValue<TTable::ChunkId>();
-    chunkRegion.DDiskServiceId = it.GetValue<TTable::DDiskServiceId>();
-
-    return true;
-}
-
-bool TPartitionDirectDatabase::ReadAllChunkRegions(TVector<TChunkRegion>& chunkRegions)
-{
-    using TTable = TPartitionDirectSchema::ChunkRegions;
-
-    chunkRegions.clear();
-
-    auto it = Table<TTable>()
-        .Range()
-        .Select();
-
-    if (!it.IsReady()) {
-        return false;
-    }
-
-    while (it.IsValid()) {
-        TChunkRegion region;
-        region.StartOffset = it.GetValue<TTable::StartOffset>();
-        region.ChunkId = it.GetValue<TTable::ChunkId>();
-        region.DDiskServiceId = it.GetValue<TTable::DDiskServiceId>();
-
-        chunkRegions.push_back(region);
 
         if (!it.Next()) {
             break;

@@ -87,11 +87,6 @@ public:
     bool ReadAvailableChunks(TVector<TAvailableChunk>& availableChunks);
     void UpdateChunkStatus(ui32 chunkId, ui32 newStatus, ui64 regionIndex);
     bool FindAvailableChunkForDDisk(const TString& ddiskServiceId, ui32& chunkId);
-
-    // Chunk regions methods
-    void WriteChunkRegion(ui64 startOffset, ui32 chunkId, const TString& ddiskServiceId);
-    bool ReadChunkRegion(ui64 startOffset, TChunkRegion& chunkRegion);
-    bool ReadAllChunkRegions(TVector<TChunkRegion>& chunkRegions);
 };
 
 }   // namespace NCloud::NBlockStore::NStorage::NPartitionDirect

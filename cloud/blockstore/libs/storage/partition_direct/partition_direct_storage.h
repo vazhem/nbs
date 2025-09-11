@@ -6,6 +6,7 @@
 #include <cloud/storage/core/libs/common/error.h>
 
 #include <contrib/ydb/library/actors/core/actor.h>
+#include <contrib/ydb/library/actors/wilson/wilson_trace.h>
 
 namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 
@@ -24,17 +25,20 @@ public:
     virtual NCloud::NProto::TError ReadBlocksLocal(
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
-        std::shared_ptr<NProto::TReadBlocksLocalRequest> request) = 0;
+        std::shared_ptr<NProto::TReadBlocksLocalRequest> request,
+        const NWilson::TTraceId& traceId = {}) = 0;
 
     virtual NCloud::NProto::TError WriteBlocksLocal(
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
-        std::shared_ptr<NProto::TWriteBlocksLocalRequest> request) = 0;
+        std::shared_ptr<NProto::TWriteBlocksLocalRequest> request,
+        const NWilson::TTraceId& traceId = {}) = 0;
 
     virtual NCloud::NProto::TError ZeroBlocks(
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
-        std::shared_ptr<NProto::TZeroBlocksRequest> request) = 0;
+        std::shared_ptr<NProto::TZeroBlocksRequest> request,
+        const NWilson::TTraceId& traceId = {}) = 0;
 };
 
 using TPartitionStoragePtr = std::shared_ptr<TPartitionStorage>;

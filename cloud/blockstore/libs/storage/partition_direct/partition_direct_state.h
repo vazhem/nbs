@@ -9,6 +9,7 @@
 
 #include <contrib/ydb/core/base/blobstorage.h>
 #include <contrib/ydb/core/base/services/blobstorage_service_id.h>
+#include <contrib/ydb/library/actors/wilson/wilson_trace.h>
 
 #include <util/datetime/base.h>
 #include <util/generic/hash.h>
@@ -71,6 +72,40 @@ struct TChunkRegionInfo {
     }
 };
 
+struct TGroupChunkInfo {
+    ui32 ChunkId;
+    TString DDiskServiceId;
+    ui32 ChunkIndexInGroup;  // 0, 1, 2, ... within this group
+
+    TGroupChunkInfo() = default;
+
+    TGroupChunkInfo(ui32 chunkId, const TString& ddiskServiceId, ui32 chunkIndexInGroup)
+        : ChunkId(chunkId)
+        , DDiskServiceId(ddiskServiceId)
+        , ChunkIndexInGroup(chunkIndexInGroup)
+    {}
+};
+
+// New region-based striping approach
+struct TRegionChunkMapping {
+    ui64 RegionIndex;
+    ui64 StartOffset;                              // Start offset of this region in volume
+    ui64 EndOffset;                                // End offset of this region in volume
+    TVector<ui32> ChunkIds;                        // One chunk ID per group (16 chunks total)
+    TVector<TString> DDiskServiceIds;              // Corresponding DDisk service IDs
+
+    TRegionChunkMapping() = default;
+
+    TRegionChunkMapping(ui64 regionIndex, ui64 startOffset, ui64 endOffset)
+        : RegionIndex(regionIndex)
+        , StartOffset(startOffset)
+        , EndOffset(endOffset)
+    {
+        ChunkIds.resize(16);  // GROUPS_COUNT
+        DDiskServiceIds.resize(16);
+    }
+};
+
 struct TAvailableChunkInfo {
     ui32 ChunkId;
     TString DDiskServiceId;  // DDisk service ID for sending requests
@@ -104,45 +139,65 @@ private:
     ui32 ChunkSize;  // Dynamic chunk size from DDisk (in bytes)
 
     // Chunk management in-memory cache (single-threaded actor, no mutex needed)
-    THashMap<ui64, TChunkRegionInfo> ChunkRegionCache;  // startOffset -> chunk info
+    THashMap<ui64, TChunkRegionInfo> ChunkRegionCache;  // startOffset -> chunk info (legacy)
     THashMap<ui32, TAvailableChunkInfo> AvailableChunksCache;  // chunkId -> chunk info
 
+    // Group-aware chunk cache: groupIndex -> vector of chunks in order (legacy)
+    THashMap<ui32, TVector<TGroupChunkInfo>> GroupChunkCache;
+
+    // New region-based chunk mapping: regionIndex -> chunk mapping
+    THashMap<ui64, TRegionChunkMapping> RegionChunkCache;
+
 public:
-    explicit TPartitionState(
-        NKikimr::TTabletStorageInfoPtr storage,
+    // Number of DDisk actors in the group from config
+    static constexpr ui32 DDISK_COUNT = 2;
+
+    // Constructor
+    TPartitionState(
+        NKikimr::TTabletStorageInfoPtr storageInfo,
         TStorageConfigPtr config,
         TDiagnosticsConfigPtr diagnosticsConfig,
         IProfileLogPtr profileLog,
-        IBlockDigestGeneratorPtr digestGenerator,
+        IBlockDigestGeneratorPtr blockDigestGenerator,
         const NProto::TPartitionConfig& partitionConfig,
-        EStorageAccessMode storageAccessMode,
-        ui32 siblingCount,
-        const NActors::TActorId& owner,
-        ui64 initialCommitId)
+        EStorageAccessMode& storageAccessMode,
+        ui32& siblingCount,
+        const TActorId& volumeActorId,
+        ui64& volumeTabletId)
         : Config(partitionConfig)
-        , StorageInfo(std::move(storage))
-        , ChunkSize(0)  // Will be set when first DDisk reports chunk size
+        , StorageInfo(storageInfo)
+        , Storage(nullptr)  // Will be initialized later by actor
+        , ChunkSize(0)  // Will be set later when we get DDisk response
     {
-        if (storageType == EStorageType::Memory) {
-            Storage = std::make_shared<TInMemoryStorage>(Config.GetBlockSize());
-        } else {
-            Storage = std::make_shared<TProxyStorage>(
-                Config.GetBlockSize(), owner, this);
-        }
-
         Y_UNUSED(config);
         Y_UNUSED(diagnosticsConfig);
         Y_UNUSED(profileLog);
-        Y_UNUSED(digestGenerator);
+        Y_UNUSED(blockDigestGenerator);
         Y_UNUSED(storageAccessMode);
         Y_UNUSED(siblingCount);
-        Y_UNUSED(owner);
-        Y_UNUSED(initialCommitId);
+        Y_UNUSED(volumeActorId);
+        Y_UNUSED(volumeTabletId);
     }
 
-    const NProto::TPartitionConfig& GetConfig() const
+    // Basic getters
+    EStorageType GetStorageType() const
     {
-        return Config;
+        return storageType;
+    }
+
+    void SetStorageType(EStorageType newStorageType)
+    {
+        storageType = newStorageType;
+    }
+
+    ui32 GetVirtualGroupId() const
+    {
+        return VirtualGroupId;
+    }
+
+    void SetVirtualGroupId(ui32 groupId)
+    {
+        VirtualGroupId = groupId;
     }
 
     ui32 GetBlockSize() const
@@ -160,6 +215,11 @@ public:
         return Storage;
     }
 
+    void SetStorage(TPartitionStoragePtr storage)
+    {
+        Storage = storage;
+    }
+
     bool ValidateBlockRange(ui64 blockIndex, ui32 blocksCount) const
     {
         return blockIndex + blocksCount <= GetBlockCount();
@@ -175,14 +235,16 @@ public:
         TRequestInfoPtr requestInfo,
         ui64 startIndex,
         ui32 blocksCount,
-        const TBlockDataRef& buffer);
+        const TBlockDataRef& buffer,
+        const NWilson::TTraceId& traceId = {});
 
     NProto::TError WriteBlocks(
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         ui64 startIndex,
         ui32 blocksCount,
-        const TBlockDataRef& buffer);
+        const TBlockDataRef& buffer,
+        const NWilson::TTraceId& traceId = {});
 
     NProto::TError ZeroBlocks(
         const NActors::TActorContext& ctx,
@@ -196,16 +258,6 @@ public:
     bool CheckBlockRange(const TBlockRange64& range) const
     {
         return range.Start < GetBlockCount() && range.End < GetBlockCount();
-    }
-
-    ui32 GetVirtualGroupId() const
-    {
-        return VirtualGroupId;
-    }
-
-    void SetVirtualGroupId(ui32 groupId)
-    {
-        VirtualGroupId = groupId;
     }
 
     ui64 GetStoragePoolId() const
@@ -257,13 +309,11 @@ public:
     TVector<NActors::TActorId> GetDDiskServiceIdsForGroup(ui32 groupIndex) const
     {
         TVector<NActors::TActorId> groupDDisks;
-
         for (const auto& ddiskInfo : DDiskInfos) {
             if (ddiskInfo.GroupIndex == groupIndex) {
                 groupDDisks.push_back(ddiskInfo.ServiceId);
             }
         }
-
         return groupDDisks;
     }
 
@@ -272,15 +322,28 @@ public:
     //
 
     // Striping constants for multi-group operations
-    static constexpr ui64 STRIPE_SIZE = 512 * 1024;  // 512KB stripe size
-    static constexpr ui32 MAX_GROUPS = 3;             // Maximum number of groups (limited by test environment)
+    static constexpr ui64 STRIPE_SIZE = 512 * 1024;  // 512KB stripe size (legacy)
+    static constexpr ui32 GROUPS_COUNT = 16;             // number of groups
 
-    // Calculate region index from offset using block size for maximum granularity
-    ui64 CalculateRegionIndex(ui64 offset) const
-    {
-        // Use block size (4KB) to ensure each block gets its own region
-        // This prevents overwrites within the same chunk
-        return offset / GetBlockSize();
+    // Region-based methods
+    ui64 GetRegionSize() const {
+        return static_cast<ui64>(GROUPS_COUNT) * ChunkSize;
+    }
+
+    ui64 CalculateRegionIndex(ui64 offset) const {
+        return offset / GetRegionSize();
+    }
+
+    ui64 CalculateOffsetWithinRegion(ui64 offset) const {
+        return offset % GetRegionSize();
+    }
+
+    ui32 CalculateGroupWithinRegion(ui64 offsetWithinRegion) const {
+        return static_cast<ui32>(offsetWithinRegion / ChunkSize);
+    }
+
+    ui32 CalculateOffsetWithinChunk(ui64 offsetWithinRegion) const {
+        return static_cast<ui32>(offsetWithinRegion % ChunkSize);
     }
 
     // Striping methods for multi-group operations
@@ -288,7 +351,7 @@ public:
     {
         // Calculate which group should handle this offset based on 512KB striping
         ui64 stripeIndex = offset / STRIPE_SIZE;
-        ui32 groupIndex = static_cast<ui32>(stripeIndex % MAX_GROUPS);
+        ui32 groupIndex = static_cast<ui32>(stripeIndex % GROUPS_COUNT);
 
         return groupIndex;
     }
@@ -298,7 +361,7 @@ public:
         // Calculate the offset within the group by removing striping
         ui64 stripeIndex = offset / STRIPE_SIZE;
         ui64 offsetWithinStripe = offset % STRIPE_SIZE;
-        ui64 groupStripeIndex = stripeIndex / MAX_GROUPS;
+        ui64 groupStripeIndex = stripeIndex / GROUPS_COUNT;
         return groupStripeIndex * STRIPE_SIZE + offsetWithinStripe;
     }
 
@@ -307,14 +370,8 @@ public:
         // Reverse calculation: convert group offset back to global offset
         ui64 groupStripeIndex = groupOffset / STRIPE_SIZE;
         ui64 offsetWithinStripe = groupOffset % STRIPE_SIZE;
-        ui64 globalStripeIndex = groupStripeIndex * MAX_GROUPS + groupIndex;
+        ui64 globalStripeIndex = groupStripeIndex * GROUPS_COUNT + groupIndex;
         return globalStripeIndex * STRIPE_SIZE + offsetWithinStripe;
-    }
-
-    ui64 CalculateRegionStartOffset(ui64 regionIndex) const
-    {
-        Y_ABORT_UNLESS(ChunkSize > 0, "ChunkSize must be set before calculating regions");
-        return regionIndex * ChunkSize;
     }
 
     // Getter for chunk size
@@ -329,29 +386,54 @@ public:
         if (ChunkSize == 0) {
             ChunkSize = chunkSize;
             // LOG_INFO can't be used here without context, will be logged from caller
-        } else if (ChunkSize != chunkSize) {
-            // LOG_WARN can't be used here without context, will be logged from caller
-            Y_ABORT_UNLESS(false, "Chunk size mismatch! Expected: %u, received: %u",
-                          ChunkSize, chunkSize);
         }
     }
 
-    // Cache operations (single-threaded actor, no locking needed)
-    bool FindChunkForRegion(ui64 regionIndex, TChunkRegionInfo& chunkInfo) const
+    // Region-based chunk lookup (new approach)
+    bool FindChunkForOffset(ui64 offset, ui32& chunkId, TString& ddiskServiceId, ui32& chunkRelativeOffset) const
     {
-        // Map small logical regions (4KB each) to large physical chunk regions (35MB each)
-        // Calculate which chunk-sized region this small region belongs to
-        ui64 logicalStartOffset = regionIndex * GetBlockSize();
-        ui64 chunkRegionIndex = logicalStartOffset / ChunkSize;
-        ui64 chunkStartOffset = chunkRegionIndex * ChunkSize;
+        // Step 1: Use original striping logic to determine the group
+        ui32 groupIndex = CalculateGroupIndex(offset);
+        ui64 groupOffset = CalculateGroupOffset(offset);
 
-        auto it = ChunkRegionCache.find(chunkStartOffset);
-        if (it != ChunkRegionCache.end()) {
-            chunkInfo = it->second;
-            return true;
+        // Step 2: Calculate which region this group offset belongs to
+        // CRITICAL: This calculation must match the allocation logic
+        ui32 chunkIndexInGroup = static_cast<ui32>(groupOffset / ChunkSize);
+
+        // Step 3: Determine which region should handle this chunk index in the group
+        // FIXED: Use consistent region selection logic
+        ui64 totalRegions = GetTotalRegionsNeeded();
+        if (RegionChunkCache.empty()) {
+            // CRITICAL ERROR: No regions allocated - this should not happen
+            return false;
         }
-        return false;
+
+        // CRITICAL: This must match CompletePreallocateVolumeChunks logic:
+        // ui64 targetRegionIndex = logicalChunkIndexInGroup % totalRegionsNeeded;
+        ui64 targetRegionIndex = chunkIndexInGroup % totalRegions;
+
+        // Step 4: Get the chunk ID from the region mapping
+        auto regionIt = RegionChunkCache.find(targetRegionIndex);
+        if (regionIt == RegionChunkCache.end()) {
+            // Region not found - this is now a CRITICAL ERROR (no fallback to legacy)
+            return false;
+        }
+
+        const auto& regionMapping = regionIt->second;
+        if (groupIndex >= regionMapping.ChunkIds.size() ||
+            regionMapping.ChunkIds[groupIndex] == 0) {
+            // Group not found or zero in region - CRITICAL ERROR
+            return false;
+        }
+
+        chunkId = regionMapping.ChunkIds[groupIndex];
+        ddiskServiceId = regionMapping.DDiskServiceIds[groupIndex];
+        chunkRelativeOffset = static_cast<ui32>(groupOffset - (chunkIndexInGroup * ChunkSize));
+
+        return true;
     }
+
+public:
 
     void AddChunkRegionToCache(const TChunkRegionInfo& chunkInfo)
     {
@@ -363,36 +445,93 @@ public:
         AvailableChunksCache[chunkInfo.ChunkId] = chunkInfo;
     }
 
-    bool FindAvailableChunkForDDisk(const TString& ddiskServiceId, ui32& chunkId)
+    // Region-based chunk management methods
+    void AddRegionMapping(ui64 regionIndex, ui32 groupIndex, ui32 chunkId, const TString& ddiskServiceId)
     {
-        for (const auto& [id, chunk] : AvailableChunksCache) {
-            if (chunk.DDiskServiceId == ddiskServiceId && chunk.Status == EChunkStatus::Available) {
-                chunkId = id;
-                return true;
-            }
+        auto& regionMapping = RegionChunkCache[regionIndex];
+        if (regionMapping.ChunkIds.empty()) {
+            // Initialize new region
+            ui64 startOffset = regionIndex * GetRegionSize();
+            ui64 endOffset = startOffset + GetRegionSize() - 1;
+            regionMapping = TRegionChunkMapping(regionIndex, startOffset, endOffset);
+        }
+
+        regionMapping.ChunkIds[groupIndex] = chunkId;
+        regionMapping.DDiskServiceIds[groupIndex] = ddiskServiceId;
+    }
+
+    bool GetRegionMapping(ui64 regionIndex, TRegionChunkMapping& mapping) const
+    {
+        auto it = RegionChunkCache.find(regionIndex);
+        if (it != RegionChunkCache.end()) {
+            mapping = it->second;
+            return true;
         }
         return false;
     }
 
-    void UpdateChunkStatus(ui32 chunkId, EChunkStatus newStatus, ui64 regionIndex)
+    // Group-aware chunk management
+    void AddChunkToGroup(ui32 groupIndex, ui32 chunkId, const TString& ddiskServiceId)
     {
-        auto it = AvailableChunksCache.find(chunkId);
-        if (it != AvailableChunksCache.end()) {
-            it->second.Status = newStatus;
-            it->second.RegionIndex = regionIndex;
-        }
+        auto& groupChunks = GroupChunkCache[groupIndex];
+        ui32 chunkIndexInGroup = static_cast<ui32>(groupChunks.size());
+
+        groupChunks.emplace_back(chunkId, ddiskServiceId, chunkIndexInGroup);
+
+        // DEBUG: This should be logged in CompletePreallocateVolumeChunks
+
+        // Also maintain legacy cache for compatibility
+        ui64 groupOffset = chunkIndexInGroup * ChunkSize;
+        ui64 globalOffset = CalculateGlobalOffset(groupIndex, groupOffset);
+
+        // Create legacy chunk region info
+        TChunkRegionInfo legacyInfo(globalOffset, chunkId, ddiskServiceId);
+
+        AddChunkRegionToCache(legacyInfo);
     }
 
-    void LoadChunkCaches(const TVector<TChunkRegionInfo>& regions, const TVector<TAvailableChunkInfo>& chunks)
+    // Loader for chunk caches from persisted data
+    void LoadChunkCaches(const TVector<TChunkRegionInfo>& regions)
     {
-        ChunkRegionCache.clear();
-        for (const auto& region : regions) {
-            ChunkRegionCache[region.StartOffset] = region;
-        }
+        // Rebuild both GroupChunkCache (for backward compatibility) and RegionChunkCache
+        GroupChunkCache.clear();
+        RegionChunkCache.clear();
 
-        AvailableChunksCache.clear();
-        for (const auto& chunk : chunks) {
-            AvailableChunksCache[chunk.ChunkId] = chunk;
+        // Sort regions by GlobalOffset to process in allocation order
+        TVector<TChunkRegionInfo> sortedRegions(regions.begin(), regions.end());
+        std::sort(sortedRegions.begin(), sortedRegions.end(),
+            [](const TChunkRegionInfo& a, const TChunkRegionInfo& b) {
+                return a.StartOffset < b.StartOffset;
+            });
+
+        for (const auto& region : sortedRegions) {
+            // Legacy GroupChunkCache rebuild
+            for (ui32 testGroupIndex = 0; testGroupIndex < GROUPS_COUNT; ++testGroupIndex) {
+                auto& groupChunks = GroupChunkCache[testGroupIndex];
+                ui64 testGroupOffset = groupChunks.size() * ChunkSize;
+                ui64 expectedGlobalOffset = CalculateGlobalOffset(testGroupIndex, testGroupOffset);
+
+                if (expectedGlobalOffset == region.StartOffset) {
+                    // This region belongs to testGroupIndex
+                    groupChunks.emplace_back(region.ChunkId, region.DDiskServiceId, groupChunks.size());
+
+                    // Map to new region-based system
+                    ui64 regionIndex = CalculateRegionIndex(region.StartOffset);
+                    ui64 offsetWithinRegion = CalculateOffsetWithinRegion(region.StartOffset);
+                    ui32 groupWithinRegion = CalculateGroupWithinRegion(offsetWithinRegion);
+
+                    // Add to RegionChunkCache
+                    auto& regionMapping = RegionChunkCache[regionIndex];
+                    if (regionMapping.ChunkIds.empty()) {
+                        ui64 startOffset = regionIndex * GetRegionSize();
+                        ui64 endOffset = startOffset + GetRegionSize() - 1;
+                        regionMapping = TRegionChunkMapping(regionIndex, startOffset, endOffset);
+                    }
+                    regionMapping.ChunkIds[groupWithinRegion] = region.ChunkId;
+                    regionMapping.DDiskServiceIds[groupWithinRegion] = region.DDiskServiceId;
+                    break;
+                }
+            }
         }
     }
 
@@ -407,9 +546,50 @@ public:
         return count;
     }
 
+    ui32 GetGroupChunkCount(ui32 groupIndex) const
+    {
+        auto it = GroupChunkCache.find(groupIndex);
+        if (it == GroupChunkCache.end()) {
+            return 0;
+        }
+        return static_cast<ui32>(it->second.size());
+    }
+
     ui32 GetChunkRegionCacheSize() const
     {
         return static_cast<ui32>(ChunkRegionCache.size());
+    }
+
+    ui32 GetRegionCount() const
+    {
+        return static_cast<ui32>(RegionChunkCache.size());
+    }
+
+    ui64 GetTotalRegionsNeeded() const
+    {
+        ui64 volumeSize = static_cast<ui64>(GetBlockSize()) * GetBlockCount();
+        ui64 regionSize = GetRegionSize();
+        ui64 result = (volumeSize + regionSize - 1) / regionSize;  // Round up
+
+        // Validation: Log if parameters seem inconsistent
+        static ui64 lastVolumeSize = 0;
+        static ui64 lastResult = 0;
+        if (lastVolumeSize != 0 && (lastVolumeSize != volumeSize || lastResult != result)) {
+            // Volume parameters changed during operation - potential issue
+        }
+        lastVolumeSize = volumeSize;
+        lastResult = result;
+
+        return result;
+    }
+
+    void UpdateChunkStatus(ui32 chunkId, EChunkStatus status, ui64 regionIndex)
+    {
+        auto it = AvailableChunksCache.find(chunkId);
+        if (it != AvailableChunksCache.end()) {
+            it->second.Status = status;
+            it->second.RegionIndex = regionIndex;
+        }
     }
 
     // Find the DDisk ActorId that corresponds to a service ID (using ActorId string representation)

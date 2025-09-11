@@ -112,7 +112,8 @@ struct TTxPartitionDirect
 
         TString DDiskServiceId;
         TVector<ui32> ChunkIds;
-        ui64 StartRegionIndex;  // Starting region index for this DDisk's chunks
+        ui64 StartRegionIndex;  // Starting region index for this DDisk's chunks (legacy)
+        ui32 GroupIndex;        // Group index for group-aware allocation
 
         void Clear()
         {

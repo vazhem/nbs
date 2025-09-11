@@ -5,6 +5,8 @@
 #include <cloud/blockstore/libs/service/request.h>
 #include <cloud/storage/core/libs/common/error.h>
 
+#include <contrib/ydb/library/actors/wilson/wilson_trace.h>
+
 #include <util/generic/hash.h>
 
 #include "partition_direct_storage.h"
@@ -28,17 +30,20 @@ public:
     NCloud::NProto::TError ReadBlocksLocal(
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
-        std::shared_ptr<NProto::TReadBlocksLocalRequest> request) override;
+        std::shared_ptr<NProto::TReadBlocksLocalRequest> request,
+        const NWilson::TTraceId& traceId = {}) override;
 
     NCloud::NProto::TError WriteBlocksLocal(
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
-        std::shared_ptr<NProto::TWriteBlocksLocalRequest> request) override;
+        std::shared_ptr<NProto::TWriteBlocksLocalRequest> request,
+        const NWilson::TTraceId& traceId = {}) override;
 
     NCloud::NProto::TError ZeroBlocks(
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
-        std::shared_ptr<NProto::TZeroBlocksRequest> request) override;
+        std::shared_ptr<NProto::TZeroBlocksRequest> request,
+        const NWilson::TTraceId& traceId = {}) override;
 };
 
 } // namespace NCloud::NBlockStore::NStorage::NPartitionDirect

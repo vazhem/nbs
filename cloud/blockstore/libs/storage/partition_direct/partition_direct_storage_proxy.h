@@ -98,7 +98,7 @@ private:
     ui64 NextRequestId = 1;
     THashMap<ui64, TDDiskRequestContext> PendingRequests;
 
-public:
+    public:
     explicit TProxyStorage(ui32 blockSize, TActorId ownerActorId, TPartitionState* partitionState)
         : OwnerActorId(ownerActorId)
         , PartitionState(partitionState)
@@ -109,17 +109,20 @@ public:
     NCloud::NProto::TError ReadBlocksLocal(
         const TActorContext& ctx,
         TRequestInfoPtr requestInfo,
-        std::shared_ptr<NProto::TReadBlocksLocalRequest> request) override;
+        std::shared_ptr<NProto::TReadBlocksLocalRequest> request,
+        const NWilson::TTraceId& traceId = {}) override;
 
     NCloud::NProto::TError WriteBlocksLocal(
         const TActorContext& ctx,
         TRequestInfoPtr requestInfo,
-        std::shared_ptr<NProto::TWriteBlocksLocalRequest> request) override;
+        std::shared_ptr<NProto::TWriteBlocksLocalRequest> request,
+        const NWilson::TTraceId& traceId = {}) override;
 
     NCloud::NProto::TError ZeroBlocks(
         const TActorContext& ctx,
         TRequestInfoPtr requestInfo,
-        std::shared_ptr<NProto::TZeroBlocksRequest> request) override;
+        std::shared_ptr<NProto::TZeroBlocksRequest> request,
+        const NWilson::TTraceId& traceId = {}) override;
 
     // Methods for handling YDB DDisk responses - called by partition actor
     void HandleDDiskReadResponse(
@@ -136,13 +139,15 @@ public:
         TDDiskRequestContext& requestCtx,
         const TEvBlobStorage::TEvDDiskReadResponse* msg,
         const NCloud::NProto::TError& error,
-        ui32 segmentIndex);
+        ui32 segmentIndex,
+        const NWilson::TTraceId& traceId);
 
     bool AllSegmentsComplete(const TDDiskRequestContext& requestCtx);
 
     void ReassembleAndCompleteRead(
         const NActors::TActorContext& ctx,
-        TDDiskRequestContext& requestCtx);
+        TDDiskRequestContext& requestCtx,
+        const NWilson::TTraceId& traceId);
 
 private:
     ui64 GenerateRequestId() {
@@ -159,14 +164,16 @@ private:
         const NActors::TActorContext& ctx,
         ui64 requestId,
         ui64 offset,
-        ui32 size);
+        ui32 size,
+        const NWilson::TTraceId& traceId);
 
     NCloud::NProto::TError SendWriteToDDisks(
         const NActors::TActorContext& ctx,
         ui64 requestId,
         ui64 offset,
         ui32 size,
-        const TString& data);
+        const TString& data,
+        const NWilson::TTraceId& traceId);
 
     void CompleteReadRequest(
         const NActors::TActorContext& ctx,
@@ -178,7 +185,6 @@ private:
 
     // Chunk lookup methods (all chunks are pre-allocated)
     bool FindChunkForOffset(ui64 offset, ui32& chunkId);
-    ui64 CalculateRegionIndex(ui64 offset);
 };
 
 } // namespace NCloud::NBlockStore::NStorage::NPartitionDirect

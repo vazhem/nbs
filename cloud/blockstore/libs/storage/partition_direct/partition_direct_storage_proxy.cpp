@@ -11,6 +11,7 @@
 #include <contrib/ydb/core/base/blobstorage.h>
 #include <contrib/ydb/core/base/services/blobstorage_service_id.h>
 #include <contrib/ydb/core/blobstorage/ddisk/ddisk_events.h>
+#include <contrib/ydb/library/actors/wilson/wilson_trace.h>
 
 namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 
@@ -23,7 +24,8 @@ using namespace NKikimr;
 NCloud::NProto::TError TProxyStorage::ReadBlocksLocal(
     const TActorContext& ctx,
     TRequestInfoPtr requestInfo,
-    std::shared_ptr<NProto::TReadBlocksLocalRequest> request)
+    std::shared_ptr<NProto::TReadBlocksLocalRequest> request,
+    const NWilson::TTraceId& traceId)
 {
     // Add detailed logging to trace I/O patterns
     const ui64 readStartIndex = request->GetStartIndex();
@@ -62,6 +64,7 @@ NCloud::NProto::TError TProxyStorage::ReadBlocksLocal(
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
         "READ DETAILED TRACE: requestId=" << requestId << " original_offset=" << offset
+        << " traceId=" << traceId.GetHexTraceId()
         << " original_size=" << size);
 
     // Get DDisk actors for the specific group
@@ -86,31 +89,35 @@ NCloud::NProto::TError TProxyStorage::ReadBlocksLocal(
     // Store context
     PendingRequests[requestId] = std::move(requestCtx);
 
-    // Check if read spans multiple stripe groups OR chunk boundaries - if so, split it
-    ui64 startBlock = offset / PartitionState->GetBlockSize();
-    ui64 endBlock = startBlock + (size / PartitionState->GetBlockSize()) - 1;
-    ui64 stripeSize = PartitionState->STRIPE_SIZE / PartitionState->GetBlockSize(); // 128 blocks per stripe
-    ui64 chunkSize = PartitionState->GetChunkSize(); // bytes
+    // Check if read spans multiple chunks - need to check chunk boundaries properly
+    ui32 startGroupIndex = PartitionState->CalculateGroupIndex(offset);
+    ui32 endGroupIndex = PartitionState->CalculateGroupIndex(offset + size - 1);
 
-    ui64 startStripe = startBlock / stripeSize;
-    ui64 endStripe = endBlock / stripeSize;
-    ui64 startChunk = offset / chunkSize;
-    ui64 endChunk = (offset + size - 1) / chunkSize;
+    // Get chunk boundaries for start and end offsets
+    ui32 startChunkId, endChunkId;
+    TString startDDiskServiceId, endDDiskServiceId;
+    ui32 startChunkRelativeOffset, endChunkRelativeOffset;
+
+    bool startChunkFound = PartitionState->FindChunkForOffset(offset, startChunkId, startDDiskServiceId, startChunkRelativeOffset);
+    bool endChunkFound = PartitionState->FindChunkForOffset(offset + size - 1, endChunkId, endDDiskServiceId, endChunkRelativeOffset);
+
+    bool spansChunks = (startChunkFound && endChunkFound && startChunkId != endChunkId);
+    bool spansGroups = (startGroupIndex != endGroupIndex);
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-        "BOUNDARY SPAN CHECK: startBlock=" << startBlock << " endBlock=" << endBlock
-        << " startStripe=" << startStripe << " endStripe=" << endStripe
-        << " startChunk=" << startChunk << " endChunk=" << endChunk
-        << " chunkSize=" << chunkSize);
+        "READ BOUNDARY CHECK: offset=" << offset << " size=" << size
+        << " startGroup=" << startGroupIndex << " endGroup=" << endGroupIndex
+        << " startChunk=" << (startChunkFound ? startChunkId : 0) << " endChunk=" << (endChunkFound ? endChunkId : 0)
+        << " spansGroups=" << spansGroups
+        << " spansChunks=" << spansChunks);
 
-    if (startStripe != endStripe || startChunk != endChunk) {
-        // Read spans multiple stripes or chunks - need to split
-        bool spansStripes = (startStripe != endStripe);
-        bool spansChunks = (startChunk != endChunk);
+    if (spansGroups || spansChunks) {
+        // Read spans multiple groups or chunks - need to split
         LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-            "BOUNDARY SPAN DETECTED: requestId=" << requestId
-            << " spansStripes=" << spansStripes << " (" << startStripe << "-" << endStripe << ")"
-            << " spansChunks=" << spansChunks << " (" << startChunk << "-" << endChunk << ") - SPLITTING");
+            "READ BOUNDARY SPAN DETECTED: requestId=" << requestId
+            << " traceId=" << traceId.GetHexTraceId()
+            << " spansGroups=" << spansGroups << " (" << startGroupIndex << "-" << endGroupIndex << ")"
+            << " spansChunks=" << spansChunks << " (" << startChunkId << "-" << endChunkId << ") - SPLITTING");
 
         // For multi-segment reads, create segment tracking
         PendingRequests[requestId].IsMultiSegmentRead = true;
@@ -120,15 +127,31 @@ NCloud::NProto::TError TProxyStorage::ReadBlocksLocal(
         ui32 totalSent = 0;
 
         while (currentOffset < offset + size) {
-            // Find the nearest boundary (stripe or chunk)
-            ui64 currentStripe = (currentOffset / PartitionState->GetBlockSize()) / stripeSize;
-            ui64 currentChunk = currentOffset / chunkSize;
+            // Calculate group and chunk for current offset
+            ui32 currentGroupIndex = PartitionState->CalculateGroupIndex(currentOffset);
 
-            ui64 nextStripeBoundary = (currentStripe + 1) * stripeSize * PartitionState->GetBlockSize();
-            ui64 nextChunkBoundary = (currentChunk + 1) * chunkSize;
+            // Find the chunk boundary within this group
+            ui32 currentChunkId;
+            TString currentDDiskServiceId;
+            ui32 currentChunkRelativeOffset;
 
-            // Choose the nearest boundary
-            ui64 nextBoundary = std::min(nextStripeBoundary, nextChunkBoundary);
+            if (!PartitionState->FindChunkForOffset(currentOffset, currentChunkId, currentDDiskServiceId, currentChunkRelativeOffset)) {
+                // Cannot find chunk - abort splitting
+                LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+                    "READ SPLIT ERROR: Cannot find chunk for offset " << currentOffset);
+                PendingRequests.erase(requestId);
+                return NCloud::MakeError(E_FAIL, "Cannot find chunk for offset during splitting");
+            }
+
+            // Calculate the end of current chunk
+            ui64 chunkEndOffset = currentOffset - currentChunkRelativeOffset + PartitionState->GetChunkSize();
+
+            // Calculate next group boundary (stripe boundary)
+            ui32 currentStripe = currentOffset / PartitionState->STRIPE_SIZE;
+            ui64 nextStripeBoundary = (currentStripe + 1) * PartitionState->STRIPE_SIZE;
+
+            // Choose the nearest boundary (chunk or stripe)
+            ui64 nextBoundary = std::min(chunkEndOffset, nextStripeBoundary);
             ui64 segmentEndOffset = std::min(offset + size, nextBoundary);
             ui32 segmentSize = segmentEndOffset - currentOffset;
 
@@ -136,14 +159,16 @@ NCloud::NProto::TError TProxyStorage::ReadBlocksLocal(
             PendingRequests[requestId].ReadSegments.emplace_back(currentOffset, segmentSize);
 
             LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-                "SPLIT SEGMENT: offset=" << currentOffset << "-" << segmentEndOffset
+                "READ SPLIT SEGMENT: offset=" << currentOffset << "-" << segmentEndOffset
                 << " size=" << segmentSize << " segmentIndex=" << totalSent
+                << " groupIndex=" << currentGroupIndex << " chunkId=" << currentChunkId
+                << " chunkBoundary=" << chunkEndOffset << " stripeBoundary=" << nextStripeBoundary
                 << " nearestBoundary=" << nextBoundary);
 
             // Encode segment index in high bits of requestId for multi-segment reads
             ui64 segmentRequestId = requestId | (static_cast<ui64>(totalSent) << 32);
 
-            auto sendResult = SendReadToDDisks(ctx, segmentRequestId, currentOffset, segmentSize);
+            auto sendResult = SendReadToDDisks(ctx, segmentRequestId, currentOffset, segmentSize, traceId);
             if (NCloud::HasError(sendResult)) {
                 PendingRequests.erase(requestId);
 
@@ -161,17 +186,18 @@ NCloud::NProto::TError TProxyStorage::ReadBlocksLocal(
         // Update expected responses for multi-segment read
         PendingRequests[requestId].PendingResponses = totalSent;
         LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-            "MULTI-STRIPE READ: sent " << totalSent << " segments");
-                } else {
-                // Single stripe - use original logic
-                LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-                    "READ SINGLE BOUNDARY: offset=" << offset << " size=" << size);
-                auto sendResult = SendReadToDDisks(ctx, requestId, offset, size);
-                if (NCloud::HasError(sendResult)) {
-                    PendingRequests.erase(requestId);
-                    return sendResult;
-                }
-            }
+            "MULTI-SEGMENT READ: sent " << totalSent << " segments");
+    } else {
+        // Single chunk/group - use direct lookup
+        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            "READ SINGLE CHUNK: offset=" << offset << " size=" << size
+            << " groupIndex=" << startGroupIndex);
+    auto sendResult = SendReadToDDisks(ctx, requestId, offset, size, traceId);
+    if (NCloud::HasError(sendResult)) {
+        PendingRequests.erase(requestId);
+        return sendResult;
+        }
+    }
 
     // Return immediately - response will be sent asynchronously
     return NCloud::MakeError(S_OK);
@@ -180,7 +206,8 @@ NCloud::NProto::TError TProxyStorage::ReadBlocksLocal(
 NCloud::NProto::TError TProxyStorage::WriteBlocksLocal(
     const TActorContext& ctx,
     TRequestInfoPtr requestInfo,
-    std::shared_ptr<NProto::TWriteBlocksLocalRequest> request)
+    std::shared_ptr<NProto::TWriteBlocksLocalRequest> request,
+    const NWilson::TTraceId& traceId)
 {
     // Add detailed logging to trace I/O patterns (calculate size from sglist later)
     const ui64 writeStartIndex = request->GetStartIndex();
@@ -245,34 +272,40 @@ NCloud::NProto::TError TProxyStorage::WriteBlocksLocal(
     }
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-        "WRITE DETAILED TRACE: requestId=" << requestId << " original_offset=" << offset
+        "WRITE DETAILED TRACE: requestId=" << requestId
+        << " traceId=" << traceId.GetHexTraceId()
+        << " original_offset=" << offset
         << " original_size=" << size << " " << dataHash);
 
-    // Check if write spans multiple stripe groups OR chunk boundaries - if so, split it
-    ui64 startBlock = offset / PartitionState->GetBlockSize();
-    ui64 endBlock = startBlock + (size / PartitionState->GetBlockSize()) - 1;
-    ui64 stripeSize = PartitionState->STRIPE_SIZE / PartitionState->GetBlockSize(); // 128 blocks per stripe
-    ui64 chunkSize = PartitionState->GetChunkSize(); // bytes
+    // Check if write spans multiple chunks - need to check chunk boundaries properly
+    ui32 startGroupIndex = PartitionState->CalculateGroupIndex(offset);
+    ui32 endGroupIndex = PartitionState->CalculateGroupIndex(offset + size - 1);
 
-    ui64 startStripe = startBlock / stripeSize;
-    ui64 endStripe = endBlock / stripeSize;
-    ui64 startChunk = offset / chunkSize;
-    ui64 endChunk = (offset + size - 1) / chunkSize;
+    // Get chunk boundaries for start and end offsets
+    ui32 startChunkId, endChunkId;
+    TString startDDiskServiceId, endDDiskServiceId;
+    ui32 startChunkRelativeOffset, endChunkRelativeOffset;
+
+    bool startChunkFound = PartitionState->FindChunkForOffset(offset, startChunkId, startDDiskServiceId, startChunkRelativeOffset);
+    bool endChunkFound = PartitionState->FindChunkForOffset(offset + size - 1, endChunkId, endDDiskServiceId, endChunkRelativeOffset);
+
+    bool spansChunks = (startChunkFound && endChunkFound && startChunkId != endChunkId);
+    bool spansGroups = (startGroupIndex != endGroupIndex);
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-        "WRITE BOUNDARY SPAN CHECK: startBlock=" << startBlock << " endBlock=" << endBlock
-        << " startStripe=" << startStripe << " endStripe=" << endStripe
-        << " startChunk=" << startChunk << " endChunk=" << endChunk
-        << " chunkSize=" << chunkSize);
+        "WRITE BOUNDARY CHECK: offset=" << offset << " size=" << size
+        << " startGroup=" << startGroupIndex << " endGroup=" << endGroupIndex
+        << " startChunk=" << (startChunkFound ? startChunkId : 0) << " endChunk=" << (endChunkFound ? endChunkId : 0)
+        << " spansGroups=" << spansGroups
+        << " spansChunks=" << spansChunks);
 
-    if (startStripe != endStripe || startChunk != endChunk) {
-        // Write spans multiple stripes or chunks - need to split
-        bool spansStripes = (startStripe != endStripe);
-        bool spansChunks = (startChunk != endChunk);
+    if (spansGroups || spansChunks) {
+        // Write spans multiple groups or chunks - need to split
         LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
             "WRITE BOUNDARY SPAN DETECTED: requestId=" << requestId
-            << " spansStripes=" << spansStripes << " (" << startStripe << "-" << endStripe << ")"
-            << " spansChunks=" << spansChunks << " (" << startChunk << "-" << endChunk << ") - SPLITTING");
+            << " traceId=" << traceId.GetHexTraceId()
+            << " spansGroups=" << spansGroups << " (" << startGroupIndex << "-" << endGroupIndex << ")"
+            << " spansChunks=" << spansChunks << " (" << startChunkId << "-" << endChunkId << ") - SPLITTING");
 
         // Set up multi-segment write tracking
         auto& storedRequestCtx = PendingRequests[requestId];
@@ -285,32 +318,57 @@ NCloud::NProto::TError TProxyStorage::WriteBlocksLocal(
         ui32 dataOffset = 0; // Track position in data string
 
         while (currentOffset < offset + size) {
-            // Find the nearest boundary (stripe or chunk)
-            ui64 currentStripe = (currentOffset / PartitionState->GetBlockSize()) / stripeSize;
-            ui64 currentChunk = currentOffset / chunkSize;
+            // Calculate group and chunk for current offset
+            ui32 currentGroupIndex = PartitionState->CalculateGroupIndex(currentOffset);
 
-            ui64 nextStripeBoundary = (currentStripe + 1) * stripeSize * PartitionState->GetBlockSize();
-            ui64 nextChunkBoundary = (currentChunk + 1) * chunkSize;
+            // Find the chunk boundary within this group
+            ui32 currentChunkId;
+            TString currentDDiskServiceId;
+            ui32 currentChunkRelativeOffset;
 
-            // Choose the nearest boundary
-            ui64 nextBoundary = std::min(nextStripeBoundary, nextChunkBoundary);
+            if (!PartitionState->FindChunkForOffset(currentOffset, currentChunkId, currentDDiskServiceId, currentChunkRelativeOffset)) {
+                // Cannot find chunk - abort splitting
+                LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+                    "WRITE SPLIT ERROR: Cannot find chunk for offset " << currentOffset);
+                PendingRequests.erase(requestId);
+                return NCloud::MakeError(E_FAIL, "Cannot find chunk for offset during splitting");
+            }
+
+            // Calculate the end of current chunk
+            ui64 chunkEndOffset = currentOffset - currentChunkRelativeOffset + PartitionState->GetChunkSize();
+
+            // Calculate next group boundary (stripe boundary)
+            ui32 currentStripe = currentOffset / PartitionState->STRIPE_SIZE;
+            ui64 nextStripeBoundary = (currentStripe + 1) * PartitionState->STRIPE_SIZE;
+
+            // Choose the nearest boundary (chunk or stripe)
+            ui64 nextBoundary = std::min(chunkEndOffset, nextStripeBoundary);
             ui64 segmentEndOffset = std::min(offset + size, nextBoundary);
             ui32 segmentSize = segmentEndOffset - currentOffset;
 
             // Extract segment data
             TString segmentData = data.substr(dataOffset, segmentSize);
 
+            // Validation: Check for data extraction consistency
+            if (segmentData.size() != segmentSize) {
+                LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+                    "SEGMENT DATA SIZE MISMATCH: expected=" << segmentSize
+                    << " actual=" << segmentData.size() << " dataOffset=" << dataOffset
+                    << " totalDataSize=" << data.size());
+            }
+
             // Calculate segment data hash for verification
             TString segmentHash = TString();
             if (segmentData.size() >= 16) {
                 segmentHash = TStringBuilder() << "SegHash:" << (ui32)(segmentData[0]) << (ui32)(segmentData[8]) << (ui32)(segmentData[segmentData.size()-8]) << (ui32)(segmentData[segmentData.size()-1]);
             }
-            ui32 segmentGroupIndex = PartitionState->CalculateGroupIndex(currentOffset);
 
             LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
                 "🔧 WRITE SPLIT SEGMENT: offset=" << currentOffset << "-" << segmentEndOffset
                 << " size=" << segmentSize << " segmentIndex=" << totalSent
-                << " nearestBoundary=" << nextBoundary << " groupIndex=" << segmentGroupIndex << " " << segmentHash);
+                << " groupIndex=" << currentGroupIndex << " chunkId=" << currentChunkId
+                << " chunkBoundary=" << chunkEndOffset << " stripeBoundary=" << nextStripeBoundary
+                << " " << segmentHash);
 
             // Encode segment index in high bits of requestId for multi-segment writes
             ui64 segmentRequestId = requestId | (static_cast<ui64>(totalSent) << 32);
@@ -319,7 +377,7 @@ NCloud::NProto::TError TProxyStorage::WriteBlocksLocal(
             storedRequestCtx.WriteSegments.emplace_back(currentOffset, segmentSize);
 
             // Send segment to appropriate group
-            auto sendResult = SendWriteToDDisks(ctx, segmentRequestId, currentOffset, segmentSize, segmentData);
+            auto sendResult = SendWriteToDDisks(ctx, segmentRequestId, currentOffset, segmentSize, segmentData, traceId);
             if (NCloud::HasError(sendResult)) {
                 PendingRequests.erase(requestId);
                 LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
@@ -345,13 +403,13 @@ NCloud::NProto::TError TProxyStorage::WriteBlocksLocal(
         return NCloud::MakeError(S_OK);
     }
 
-    // Single boundary - use original logic
+    // Single chunk/group - use original logic
     // Calculate which group should handle this offset (512KB striping)
     ui32 groupIndex = PartitionState->CalculateGroupIndex(offset);
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-        "WRITE SINGLE GROUP: offset=" << offset << " groupIndex=" << groupIndex
-        << " block=" << (offset / PartitionState->GetBlockSize()) << " stripe=" << ((offset / PartitionState->GetBlockSize()) / 128));
+        "WRITE SINGLE CHUNK: offset=" << offset
+        << " groupIndex=" << groupIndex << " block=" << (offset / PartitionState->GetBlockSize()));
 
     // Get DDisk actors for the specific group and update stored context
     auto groupDDiskServiceIds = PartitionState->GetDDiskServiceIdsForGroup(groupIndex);
@@ -370,7 +428,7 @@ NCloud::NProto::TError TProxyStorage::WriteBlocksLocal(
     storedRequestCtx.DDiskActorIds = groupDDiskServiceIds;
 
     // Send write request to DDisk actors
-    auto sendResult = SendWriteToDDisks(ctx, requestId, offset, size, data);
+    auto sendResult = SendWriteToDDisks(ctx, requestId, offset, size, data, traceId);
     if (NCloud::HasError(sendResult)) {
         // Remove the pending request - error will be handled at higher level
         PendingRequests.erase(requestId);
@@ -384,7 +442,8 @@ NCloud::NProto::TError TProxyStorage::WriteBlocksLocal(
 NCloud::NProto::TError TProxyStorage::ZeroBlocks(
     const TActorContext& ctx,
     TRequestInfoPtr requestInfo,
-    std::shared_ptr<NProto::TZeroBlocksRequest> request)
+    std::shared_ptr<NProto::TZeroBlocksRequest> request,
+    const NWilson::TTraceId& traceId)
 {
     // DDisk selection will be done after calculating the group for the offset
     // For now, just check that we have some DDisk actors available
@@ -436,7 +495,7 @@ NCloud::NProto::TError TProxyStorage::ZeroBlocks(
     PendingRequests[requestId] = std::move(requestCtx);
 
     // Send write request to DDisk actors (zero data)
-    auto sendResult = SendWriteToDDisks(ctx, requestId, offset, size, zeroData);
+    auto sendResult = SendWriteToDDisks(ctx, requestId, offset, size, zeroData, traceId);
     if (NCloud::HasError(sendResult)) {
         // Remove the pending request - error will be handled at higher level
         PendingRequests.erase(requestId);
@@ -476,7 +535,8 @@ NCloud::NProto::TError TProxyStorage::SendReadToDDisks(
     const TActorContext& ctx,
     ui64 requestId,
     ui64 offset,
-    ui32 size)
+    ui32 size,
+    const NWilson::TTraceId& traceId)
 {
     // For multi-segment reads, decode the base requestId for lookup
     ui64 baseRequestId = requestId & 0xFFFFFFFF;  // Lower 32 bits
@@ -497,108 +557,109 @@ NCloud::NProto::TError TProxyStorage::SendReadToDDisks(
     auto& requestCtx = it->second;
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-        "SendReadToDDisks ENTRY: requestId=" << requestId << " offset=" << offset
+        "SendReadToDDisks ENTRY: requestId=" << requestId
+        << " traceId=" << traceId.GetHexTraceId()
+        << " offset=" << offset
         << " size=" << size);
 
-    // Calculate which group should handle this read offset (same logic as writes)
+    // Use FindChunkForOffset to get the actual chunk ID and DDisk service
+    ui32 chunkId;
+    TString ddiskServiceId;
+    ui32 chunkRelativeOffset;
+
+    if (!PartitionState->FindChunkForOffset(offset, chunkId, ddiskServiceId, chunkRelativeOffset)) {
+            LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << requestId << "] FindChunkForOffset failed for offset " << offset);
+        return NCloud::MakeError(E_FAIL, "Cannot find chunk for offset");
+        }
+
+    // Calculate group for logging purposes
     ui32 groupIndex = PartitionState->CalculateGroupIndex(offset);
-    ui64 regionIndex = offset / PartitionState->GetBlockSize();
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-        "SendReadToDDisks CALCULATED: groupIndex=" << groupIndex << " regionIndex=" << regionIndex);
+        "SendReadToDDisks FOUND CHUNK: groupIndex=" << groupIndex << " chunkId=" << chunkId
+        << " ddiskServiceId=" << ddiskServiceId << " chunkRelativeOffset=" << chunkRelativeOffset);
 
-    // Get DDisk actors for the specific group (same as write logic)
+    // Get DDisk actors for the specific group based on the chunk allocation
     auto groupDDiskServiceIds = PartitionState->GetDDiskServiceIdsForGroup(groupIndex);
     if (groupDDiskServiceIds.empty()) {
-        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
             "[" << requestId << "] No DDisk actors available for group " << groupIndex);
         return NCloud::MakeError(E_FAIL, "No DDisk actors available for group");
     }
 
-    // For reads, choose the first DDisk actor from the correct group
-    const auto& targetActorId = groupDDiskServiceIds[0];
+    // Use the specific DDisk from FindChunkForOffset for consistency
+    TActorId targetActorId;
+    bool foundMatchingActor = false;
+    for (const auto& actorId : groupDDiskServiceIds) {
+        if (actorId.ToString() == ddiskServiceId) {
+            targetActorId = actorId;
+            foundMatchingActor = true;
+            break;
+        }
+    }
 
-    // Validate ActorId before sending
-    if (!targetActorId) {
-        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-            "[" << requestId << "] Invalid DDisk ActorId");
-        return NCloud::MakeError(E_FAIL, "Invalid DDisk ActorId");
+    if (!foundMatchingActor) {
+        return NCloud::MakeError(E_FAIL, "Cannot find ddisk");
     }
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-        "[" << requestId << "] read Fixed striping: offset=" << offset
-        << " blockSize=" << PartitionState->GetBlockSize()
-        << " groupIndex=" << groupIndex << " regionIndex=" << regionIndex);
+        "[" << requestId << "] read Using FindChunkForOffset: offset=" << offset
+        << " groupIndex=" << groupIndex << " chunkId=" << chunkId
+        << " chunkRelativeOffset=" << chunkRelativeOffset);
 
-    TChunkRegionInfo chunkInfo;
-    if (!PartitionState->FindChunkForRegion(regionIndex, chunkInfo)) {
-        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-            "[" << requestId << "] No chunk allocated for offset " << offset
-            << " (group " << groupIndex << ", region " << regionIndex
-            << ") - returning zero data");
+    // Validate chunk relative offset (already calculated correctly by FindChunkForOffset)
+    if (chunkRelativeOffset >= PartitionState->GetChunkSize()) {
+            LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << requestId << "] Invalid chunk relative offset: " << chunkRelativeOffset
+            << " >= chunkSize " << PartitionState->GetChunkSize());
+        return NCloud::MakeError(E_FAIL, "Invalid chunk relative offset");
+        }
 
-        // Return zero data for unallocated regions
-        SendZeroDataResponse(ctx, requestId, size);
-        return NCloud::MakeError(S_OK);
-    }
-
-    // Calculate chunk-relative offset using the same logic as FindChunkForRegion
-    ui64 logicalStartOffset = regionIndex * PartitionState->GetBlockSize();
-    ui64 chunkRegionIndex = logicalStartOffset / PartitionState->GetChunkSize();
-    ui64 chunkStartOffset = chunkRegionIndex * PartitionState->GetChunkSize();
-    ui64 chunkRelativeOffsetLong = logicalStartOffset - chunkStartOffset;
-
-    ui32 chunkRelativeOffset = static_cast<ui32>(chunkRelativeOffsetLong);
-
-    // Validate offset before sending to DDisk
-    if (chunkRelativeOffsetLong > UINT32_MAX) {
-        LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
-            "[" << requestId << "] Chunk relative offset overflow: " << chunkRelativeOffsetLong
-            << " > UINT32_MAX, logicalStartOffset=" << logicalStartOffset
-            << ", chunkStartOffset=" << chunkStartOffset);
-        return NCloud::MakeError(E_FAIL, "Chunk relative offset overflow");
-    }
-
-    // Additional validation: check if chunkRelativeOffset is reasonable for chunk size
-    ui32 chunkSize = PartitionState->GetChunkSize();
+        // Additional validation: check if chunkRelativeOffset is reasonable for chunk size
+        ui32 chunkSize = PartitionState->GetChunkSize();
     ui32 remainingChunkSpace = chunkSize - chunkRelativeOffset;
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-        "CHUNK BOUNDARY CHECK: requestId=" << requestId << " absoluteOffset=" << offset
-        << " size=" << size << " chunkId=" << chunkInfo.ChunkId
+        "CHUNK BOUNDARY CHECK: requestId=" << requestId
+        << " traceId=" << traceId.GetHexTraceId()
+        << " absoluteOffset=" << offset
+        << " size=" << size << " chunkId=" << chunkId
         << " chunkRelativeOffset=" << chunkRelativeOffset << " chunkSize=" << chunkSize
         << " remainingSpace=" << remainingChunkSpace << " requestFits=" << (size <= remainingChunkSpace));
 
-    if (chunkRelativeOffset >= chunkSize) {
-        LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
-            "[" << requestId << "] Chunk relative offset " << chunkRelativeOffset
-            << " >= chunkSize " << chunkSize << " for chunkId " << chunkInfo.ChunkId);
-        return NCloud::MakeError(E_FAIL, "Invalid chunk relative offset");
-    }
+        if (chunkRelativeOffset >= chunkSize) {
+            LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+                "[" << requestId << "] Chunk relative offset " << chunkRelativeOffset
+            << " >= chunkSize " << chunkSize << " for chunkId " << chunkId);
+            return NCloud::MakeError(E_FAIL, "Invalid chunk relative offset");
+        }
 
     // Check if request spans beyond current chunk boundary
     // Note: Boundary spanning is now handled at ReadBlocksLocal level
     if (size > remainingChunkSpace) {
         LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
             "READ CHUNK BOUNDARY SPAN: requestId=" << requestId
+            << " traceId=" << traceId.GetHexTraceId()
             << " size=" << size << " > remainingSpace=" << remainingChunkSpace
-            << " Should have been split at ReadBlocksLocal level! offset=" << offset << " chunkId=" << chunkInfo.ChunkId);
+            << " Should have been split at ReadBlocksLocal level! offset=" << offset << " chunkId=" << chunkId);
         return NCloud::MakeError(E_FAIL, "Read request spans chunk boundary - should have been split");
-    }
+        }
 
-    auto request = std::make_unique<TEvBlobStorage::TEvDDiskReadRequest>();
-    request->Record.SetOffset(chunkRelativeOffset);  // Chunk-relative offset
-    request->Record.SetSize(size);
-    request->Record.SetChunkId(chunkInfo.ChunkId);
+        auto request = std::make_unique<TEvBlobStorage::TEvDDiskReadRequest>();
 
+        request->Record.SetOffset(chunkRelativeOffset);  // Chunk-relative offset
+        request->Record.SetSize(size);
+    request->Record.SetChunkId(chunkId);
+
+    // Log the exact read request being sent to DDisk
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-        "[" << requestId << "] SendReadToDDisks: requestId=" << requestId
-        << ", absoluteOffset=" << offset << ", groupIndex=" << groupIndex
-        << ", regionIndex=" << regionIndex
-        << ", logicalStartOffset=" << logicalStartOffset << ", chunkStartOffset=" << chunkStartOffset
-        << ", chunkRelativeOffset=" << chunkRelativeOffset
-        << ", size=" << size << ", chunkId=" << chunkInfo.ChunkId
-        << ", target=" << targetActorId.ToString());
+        "📖 DDISK READ REQUEST: requestId=" << requestId
+        << " traceId=" << traceId.GetHexTraceId()
+        << " DDiskService=" << ddiskServiceId
+        << " DDiskActor=" << targetActorId.ToString()
+        << " chunkId=" << chunkId << " offset=" << chunkRelativeOffset
+        << " size=" << size);
 
     // Set pending responses to 1 for single-segment reads only
     // For multi-segment reads, PendingResponses is already set correctly
@@ -606,8 +667,9 @@ NCloud::NProto::TError TProxyStorage::SendReadToDDisks(
         requestCtx.PendingResponses = 1;
     }
 
-    ctx.Send(targetActorId, request.release(), 0, requestId);
-    return NCloud::MakeError(S_OK);
+    // Send with TraceId for request tracing
+    ctx.Send(new IEventHandle(targetActorId, ctx.SelfID, request.release(), 0, requestId, nullptr, NWilson::TTraceId(traceId)));
+        return NCloud::MakeError(S_OK);
 }
 
 NCloud::NProto::TError TProxyStorage::SendWriteToDDisks(
@@ -615,7 +677,8 @@ NCloud::NProto::TError TProxyStorage::SendWriteToDDisks(
     ui64 requestId, // This requestId now includes segmentIndex in high bits
     ui64 offset,
     ui32 size,
-    const TString& data)
+    const TString& data,
+    const NWilson::TTraceId& traceId)
 {
     ui64 baseRequestId = requestId & 0xFFFFFFFF;  // Lower 32 bits
     ui32 segmentIndex = static_cast<ui32>(requestId >> 32);  // Upper 32 bits
@@ -627,42 +690,32 @@ NCloud::NProto::TError TProxyStorage::SendWriteToDDisks(
 
     auto& requestCtx = it->second;
 
-    // Calculate region index properly for striping
-    // Region indices should be consecutive, but groups are determined by striping logic
-    ui32 groupIndex = PartitionState->CalculateGroupIndex(offset);
-    ui64 regionIndex = offset / PartitionState->GetBlockSize();
+    // Use FindChunkForOffset to get the actual chunk ID and DDisk service
+    ui32 chunkId;
+    TString ddiskServiceId;
+    ui32 chunkRelativeOffset;
 
-    LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-        "[" << requestId << "] write Fixed striping: offset=" << offset
-        << " blockSize=" << PartitionState->GetBlockSize()
-        << " groupIndex=" << groupIndex << " regionIndex=" << regionIndex);
-
-    TChunkRegionInfo chunkInfo;
-    if (!PartitionState->FindChunkForRegion(regionIndex, chunkInfo)) {
+    if (!PartitionState->FindChunkForOffset(offset, chunkId, ddiskServiceId, chunkRelativeOffset)) {
         // With pre-allocation, all chunks should already be allocated
-        // If we reach here, it means pre-allocation didn't cover this region
         LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
-            "[" << requestId << "] No chunk allocated for offset " << offset
-            << " (group " << groupIndex << ", region " << regionIndex
-            << ") - volume may not be fully pre-allocated");
+            "[" << requestId << "] No chunk allocated for offset " << offset);
         return NCloud::MakeError(E_FAIL, "No chunk allocated for requested region");
     }
 
-    // Calculate chunk-relative offset using the same logic as FindChunkForRegion
-    ui64 logicalStartOffset = regionIndex * PartitionState->GetBlockSize();
-    ui64 chunkRegionIndex = logicalStartOffset / PartitionState->GetChunkSize();
-    ui64 chunkStartOffset = chunkRegionIndex * PartitionState->GetChunkSize();
-    ui64 chunkRelativeOffsetLong = logicalStartOffset - chunkStartOffset;
+    // Calculate group for logging purposes
+    ui32 groupIndex = PartitionState->CalculateGroupIndex(offset);
 
-    ui32 chunkRelativeOffset = static_cast<ui32>(chunkRelativeOffsetLong);
+    LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << requestId << "] write Using FindChunkForOffset: offset=" << offset
+        << " groupIndex=" << groupIndex << " chunkId=" << chunkId
+        << " ddiskServiceId=" << ddiskServiceId << " chunkRelativeOffset=" << chunkRelativeOffset);
 
-    // Validate offset before sending to DDisk
-    if (chunkRelativeOffsetLong > UINT32_MAX) {
+    // Validate chunk relative offset (already calculated correctly by FindChunkForOffset)
+    if (chunkRelativeOffset >= PartitionState->GetChunkSize()) {
                     LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
-                "[" << requestId << "] Write chunk relative offset overflow: " << chunkRelativeOffsetLong
-                << " > UINT32_MAX, logicalStartOffset=" << logicalStartOffset
-                << ", chunkStartOffset=" << chunkStartOffset);
-        return NCloud::MakeError(E_FAIL, "Chunk relative offset overflow");
+            "[" << requestId << "] Invalid write chunk relative offset: " << chunkRelativeOffset
+            << " >= chunkSize " << PartitionState->GetChunkSize());
+        return NCloud::MakeError(E_FAIL, "Invalid write chunk relative offset");
     }
 
     // Additional validation: check if chunkRelativeOffset is reasonable for chunk size
@@ -671,14 +724,15 @@ NCloud::NProto::TError TProxyStorage::SendWriteToDDisks(
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
         "WRITE CHUNK BOUNDARY CHECK: requestId=" << requestId << " absoluteOffset=" << offset
-        << " size=" << size << " chunkId=" << chunkInfo.ChunkId
+        << " traceId=" << traceId.GetHexTraceId()
+        << " size=" << size << " chunkId=" << chunkId
         << " chunkRelativeOffset=" << chunkRelativeOffset << " chunkSize=" << chunkSize
         << " remainingSpace=" << remainingChunkSpace << " requestFits=" << (size <= remainingChunkSpace));
 
     if (chunkRelativeOffset >= chunkSize) {
         LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
             "[" << requestId << "] Write chunk relative offset " << chunkRelativeOffset
-            << " >= chunkSize " << chunkSize << " for chunkId " << chunkInfo.ChunkId);
+            << " >= chunkSize " << chunkSize << " for chunkId " << chunkId);
         return NCloud::MakeError(E_FAIL, "Invalid chunk relative offset");
     }
 
@@ -687,57 +741,77 @@ NCloud::NProto::TError TProxyStorage::SendWriteToDDisks(
     if (size > remainingChunkSpace) {
         LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
             "WRITE CHUNK BOUNDARY SPAN: requestId=" << requestId
+            << " traceId=" << traceId.GetHexTraceId()
             << " size=" << size << " > remainingSpace=" << remainingChunkSpace
-            << " Should have been split at WriteBlocksLocal level! offset=" << offset << " chunkId=" << chunkInfo.ChunkId);
+            << " Should have been split at WriteBlocksLocal level! offset=" << offset << " chunkId=" << chunkId);
         return NCloud::MakeError(E_FAIL, "Write request spans chunk boundary - should have been split");
     }
 
-    // Get DDisk actors for this segment's group (needed for multi-segment writes)
+    // Get DDisk actors for this segment's group
     auto segmentDDiskServiceIds = PartitionState->GetDDiskServiceIdsForGroup(groupIndex);
     if (segmentDDiskServiceIds.empty()) {
         LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
-            "[" << requestId << "] No DDisk actors available for segment group " << groupIndex);
+            "[" << requestId << "] traceId=" << traceId.GetHexTraceId()
+            << " No DDisk actors available for segment group " << groupIndex);
         return NCloud::MakeError(E_FAIL, "No DDisk actors available for segment group");
     }
 
-    // For multi-segment writes, update context DDisk actors for this segment
-    if (requestCtx.IsMultiSegmentWrite) {
-        requestCtx.DDiskActorIds = segmentDDiskServiceIds;
-        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-            "WRITE SEGMENT DDisk: segmentIndex=" << segmentIndex
-            << " groupIndex=" << groupIndex << " ddiskCount=" << segmentDDiskServiceIds.size());
+    // Use the specific DDisk from FindChunkForOffset for consistency
+    TActorId targetActorId;
+    bool foundMatchingActor = false;
+    for (const auto& actorId : segmentDDiskServiceIds) {
+        if (actorId.ToString() == ddiskServiceId) {
+            targetActorId = actorId;
+            foundMatchingActor = true;
+            break;
+        }
     }
 
-    // For ErasureMirror3Direct, write to all replicas for this segment
-    for (const auto& ddiskActorId : segmentDDiskServiceIds) {
+    if (!foundMatchingActor) {
+        return NCloud::MakeError(E_FAIL, "Cannot find ddisk");
+    }
+
+    // For multi-segment writes, track the specific DDisk actor for this segment
+    if (requestCtx.IsMultiSegmentWrite) {
+        requestCtx.DDiskActorIds = {targetActorId}; // Single specific DDisk for this chunk
+        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            "WRITE SEGMENT DDisk: segmentIndex=" << segmentIndex
+            << " groupIndex=" << groupIndex << " chunkId=" << chunkId
+            << " targetDDisk=" << ddiskServiceId);
+    }
+
+    // Write to the specific DDisk that holds this chunk
         auto request = std::make_unique<TEvBlobStorage::TEvDDiskWriteRequest>();
+
         request->Record.SetOffset(chunkRelativeOffset);  // Chunk-relative offset
         request->Record.SetSize(size);
         request->Record.SetData(data);
-        request->Record.SetChunkId(chunkInfo.ChunkId);
+    request->Record.SetChunkId(chunkId);
 
-        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-            "[" << requestId << "] SendWriteToDDisks: requestId=" << requestId
-            << ", absoluteOffset=" << offset << ", groupIndex=" << groupIndex
-            << ", regionIndex=" << regionIndex
-            << ", logicalStartOffset=" << logicalStartOffset << ", chunkStartOffset=" << chunkStartOffset
-            << ", chunkRelativeOffset=" << chunkRelativeOffset
-            << ", size=" << size << ", chunkId=" << chunkInfo.ChunkId
-            << ", target=" << ddiskActorId.ToString());
+    LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << requestId << "] traceId=" << traceId.GetHexTraceId()
+        << " traceId=" << traceId.GetHexTraceId()
+        << " 📤 WRITE REQUEST: offset=" << offset
+        << " group=" << groupIndex << " chunkId=" << chunkId
+        << " chunkRelOffset=" << chunkRelativeOffset << " size=" << size
+        << " target=" << targetActorId.ToString() << " ddiskService=" << ddiskServiceId
+        << " segmentIndex=" << segmentIndex
+        << " encodedRequestId=" << requestId << " (baseId=" << (requestId & 0xFFFFFFFF)
+        << " segIdx=" << (requestId >> 32) << ")");
 
-        ctx.Send(ddiskActorId, request.release(), 0, requestId);
-    }
+    // Send with TraceId for request tracing
+    ctx.Send(new IEventHandle(targetActorId, ctx.SelfID, request.release(), 0, requestId, nullptr, NWilson::TTraceId(traceId)));
 
     // For multi-segment writes, accumulate the response count for each segment
     if (requestCtx.IsMultiSegmentWrite) {
-        requestCtx.PendingResponses += segmentDDiskServiceIds.size();
+        requestCtx.PendingResponses += 1; // Single DDisk per chunk
         LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
             "WRITE SEGMENT SENT: segmentIndex=" << segmentIndex
-            << " ddiskCount=" << segmentDDiskServiceIds.size()
+            << " chunkId=" << chunkId
             << " totalPending=" << requestCtx.PendingResponses);
     } else {
         // Single-segment writes
-        requestCtx.PendingResponses = segmentDDiskServiceIds.size();
+        requestCtx.PendingResponses = 1; // Single DDisk per chunk
     }
 
     return NCloud::MakeError(S_OK);
@@ -754,8 +828,19 @@ void TProxyStorage::HandleDDiskReadResponse(
     const ui64 baseRequestId = responseRequestId & 0xFFFFFFFF;  // Lower 32 bits
     const ui32 segmentIndex = static_cast<ui32>(responseRequestId >> 32);  // Upper 32 bits
 
+    LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << baseRequestId << "] 📥 READ RESPONSE RECEIVED: responseRequestId=" << responseRequestId
+        << " traceId=" << ev->TraceId.GetHexTraceId()
+        << " (baseId=" << baseRequestId << " segIdx=" << segmentIndex << ")"
+        << " status=" << msg->Record.GetStatus());
+
     auto it = PendingRequests.find(baseRequestId);
     if (it == PendingRequests.end()) {
+        LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+            "🚨 READ RESPONSE ORPHAN: baseRequestId=" << baseRequestId
+            << " traceId=" << ev->TraceId.GetHexTraceId()
+            << " segmentIndex=" << segmentIndex << " responseRequestId=" << responseRequestId
+            << " - REQUEST NOT FOUND IN PENDING REQUESTS!");
         return; // Request already completed or timed out
     }
 
@@ -776,19 +861,39 @@ void TProxyStorage::HandleDDiskReadResponse(
         responseHash = TStringBuilder() << "RespHash:" << (ui32)(responseData[0]) << (ui32)(responseData[8]) << (ui32)(responseData[responseData.size()-8]) << (ui32)(responseData[responseData.size()-1]);
     }
 
+    // // DETAILED DATA LOGGING: Log actual data received from DDisk
+    // if (responseData.size() >= 32) {
+    //     TString dataLogPrefix = TString();
+    //     TString dataLogSuffix = TString();
+    //     for (int i = 0; i < std::min<int>(16, responseData.size()); i++) {
+    //         dataLogPrefix += TStringBuilder() << " " << (ui32)(ui8)responseData[i];
+    //     }
+    //     if (responseData.size() > 16) {
+    //         for (int i = std::max<int>(16, static_cast<int>(responseData.size()-16)); i < static_cast<int>(responseData.size()); i++) {
+    //             dataLogSuffix += TStringBuilder() << " " << (ui32)(ui8)responseData[i];
+    //         }
+    //     }
+    //     LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+    //         "📖 DDISK READ DATA: requestId=" << baseRequestId
+    //         << " traceId=" << ev->TraceId.GetHexTraceId()
+    //         << " segmentIndex=" << segmentIndex << " offset=" << requestCtx.Offset
+    //         << " size=" << responseData.size() << " dataPrefix[" << dataLogPrefix << " ]"
+    //         << " dataSuffix[" << dataLogSuffix << " ]");
+    // }
+
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
         "READ RESPONSE: baseRequestId=" << baseRequestId << " segmentIndex=" << segmentIndex
         << " responseSize=" << responseData.size() << " " << responseHash);
 
     // Handle multi-segment reads
     if (requestCtx.IsMultiSegmentRead) {
-        HandleMultiSegmentResponse(ctx, requestCtx, msg, error, segmentIndex);
+        HandleMultiSegmentResponse(ctx, requestCtx, msg, error, segmentIndex, ev->TraceId);
         requestCtx.PendingResponses--;
 
         // Check if all segments are complete
         if (requestCtx.PendingResponses == 0) {
             if (AllSegmentsComplete(requestCtx)) {
-                ReassembleAndCompleteRead(ctx, requestCtx);
+                ReassembleAndCompleteRead(ctx, requestCtx, ev->TraceId);
             } else {
                 // Some segments failed
                 requestCtx.AccumulatedError = NCloud::MakeError(E_FAIL, "Failed to read all segments");
@@ -798,17 +903,17 @@ void TProxyStorage::HandleDDiskReadResponse(
         }
     } else {
         // Single segment read - original logic
-        if (NCloud::HasError(error)) {
-            requestCtx.AccumulatedError = error;
-        } else {
-            requestCtx.ReadData = msg->Record.GetData();
-        }
+    if (NCloud::HasError(error)) {
+        requestCtx.AccumulatedError = error;
+    } else {
+        requestCtx.ReadData = msg->Record.GetData();
+    }
 
-        requestCtx.PendingResponses--;
+    requestCtx.PendingResponses--;
 
-        if (requestCtx.PendingResponses == 0 || !NCloud::HasError(error)) {
-            CompleteReadRequest(ctx, requestCtx);
-            PendingRequests.erase(it);
+    if (requestCtx.PendingResponses == 0 || !NCloud::HasError(error)) {
+        CompleteReadRequest(ctx, requestCtx);
+        PendingRequests.erase(it);
         }
     }
 }
@@ -821,11 +926,13 @@ void TProxyStorage::HandleMultiSegmentResponse(
     TDDiskRequestContext& requestCtx,
     const TEvBlobStorage::TEvDDiskReadResponse* msg,
     const NCloud::NProto::TError& error,
-    ui32 segmentIndex)
+    ui32 segmentIndex,
+    const NWilson::TTraceId& traceId)
 {
     if (NCloud::HasError(error)) {
         LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
             "SEGMENT ERROR: requestId=" << requestCtx.RequestId
+            << " traceId=" << traceId.GetHexTraceId()
             << " segmentIndex=" << segmentIndex << " error=" << error.GetMessage());
         return;
     }
@@ -834,6 +941,7 @@ void TProxyStorage::HandleMultiSegmentResponse(
     if (segmentIndex >= requestCtx.ReadSegments.size()) {
         LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
             "INVALID SEGMENT INDEX: segmentIndex=" << segmentIndex
+            << " traceId=" << traceId.GetHexTraceId()
             << " maxSegments=" << requestCtx.ReadSegments.size());
         return;
     }
@@ -843,6 +951,7 @@ void TProxyStorage::HandleMultiSegmentResponse(
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
         "🔧 SEGMENT RESPONSE: requestId=" << requestCtx.RequestId
+        << " traceId=" << traceId.GetHexTraceId()
         << " segmentIndex=" << segmentIndex << " offset=" << segment.Offset
         << " expectedSize=" << segment.Size << " receivedSize=" << responseData.size());
 
@@ -852,6 +961,7 @@ void TProxyStorage::HandleMultiSegmentResponse(
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
         "🔧 SEGMENT COMPLETE: segmentIndex=" << segmentIndex
+        << " traceId=" << traceId.GetHexTraceId()
         << " offset=" << segment.Offset << " size=" << segment.Data.size());
 }
 
@@ -867,10 +977,12 @@ bool TProxyStorage::AllSegmentsComplete(const TDDiskRequestContext& requestCtx)
 
 void TProxyStorage::ReassembleAndCompleteRead(
     const NActors::TActorContext& ctx,
-    TDDiskRequestContext& requestCtx)
+    TDDiskRequestContext& requestCtx,
+    const NWilson::TTraceId& traceId)
 {
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
         "🔧 REASSEMBLING: requestId=" << requestCtx.RequestId
+        << " traceId=" << traceId.GetHexTraceId()
         << " segments=" << requestCtx.ReadSegments.size());
 
     // Calculate total size
@@ -919,8 +1031,19 @@ void TProxyStorage::HandleDDiskWriteResponse(
     const ui64 baseRequestId = responseRequestId & 0xFFFFFFFF;  // Lower 32 bits
     const ui32 segmentIndex = static_cast<ui32>(responseRequestId >> 32);  // Upper 32 bits
 
+    LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << baseRequestId << "] 📥 WRITE RESPONSE RECEIVED: responseRequestId=" << responseRequestId
+        << " traceId=" << ev->TraceId.GetHexTraceId()
+        << " (baseId=" << baseRequestId << " segIdx=" << segmentIndex << ")"
+        << " status=" << msg->Record.GetStatus());
+
     auto it = PendingRequests.find(baseRequestId);
     if (it == PendingRequests.end()) {
+        LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+            "🚨 WRITE RESPONSE ORPHAN: baseRequestId=" << baseRequestId
+            << " traceId=" << ev->TraceId.GetHexTraceId()
+            << " segmentIndex=" << segmentIndex << " responseRequestId=" << responseRequestId
+            << " - REQUEST NOT FOUND IN PENDING REQUESTS!");
         return; // Request already completed or timed out
     }
 
@@ -930,12 +1053,26 @@ void TProxyStorage::HandleDDiskWriteResponse(
     NCloud::NProto::TError error;
     if (msg->Record.GetStatus() != NKikimrProto::OK) {
         error = NCloud::MakeError(E_FAIL, msg->Record.GetErrorReason());
+        LOG_ERROR_S(ctx, TBlockStoreComponents::PARTITION,
+            "📝 DDISK WRITE FAILED: requestId=" << baseRequestId
+            << " traceId=" << ev->TraceId.GetHexTraceId()
+            << " segmentIndex=" << segmentIndex
+            << " status=" << msg->Record.GetStatus()
+            << " error=" << msg->Record.GetErrorReason());
     } else {
         error = NCloud::MakeError(S_OK);
+        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            "📝 DDISK WRITE SUCCESS: requestId=" << baseRequestId
+            << " traceId=" << ev->TraceId.GetHexTraceId()
+            << " segmentIndex=" << segmentIndex
+            << " confirmedBytes=" << (msg->Record.HasSize() ? msg->Record.GetSize() : 0)
+            << " chunkId=" << (msg->Record.HasChunkId() ? msg->Record.GetChunkId() : 0)
+            << " status=OK");
     }
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-        "WRITE RESPONSE: baseRequestId=" << baseRequestId << " segmentIndex=" << segmentIndex
+        "WRITE RESPONSE: baseRequestId=" << baseRequestId
+        << " traceId=" << ev->TraceId.GetHexTraceId() << " segmentIndex=" << segmentIndex
         << " status=" << (NCloud::HasError(error) ? "ERROR" : "OK"));
 
     if (requestCtx.IsMultiSegmentWrite) {
@@ -944,16 +1081,17 @@ void TProxyStorage::HandleDDiskWriteResponse(
             requestCtx.WriteSegments[segmentIndex].IsComplete = true;
             LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
                 "WRITE SEGMENT COMPLETE: requestId=" << baseRequestId
+                << " traceId=" << ev->TraceId.GetHexTraceId()
                 << " segmentIndex=" << segmentIndex << " offset=" << requestCtx.WriteSegments[segmentIndex].Offset);
         }
 
-        if (NCloud::HasError(error)) {
-            requestCtx.AccumulatedError = error;
-        }
+    if (NCloud::HasError(error)) {
+        requestCtx.AccumulatedError = error;
+    }
 
-        requestCtx.PendingResponses--;
+    requestCtx.PendingResponses--;
 
-        if (requestCtx.PendingResponses == 0) {
+    if (requestCtx.PendingResponses == 0) {
             // Check if all segments completed successfully
             bool allComplete = true;
             for (const auto& segment : requestCtx.WriteSegments) {
@@ -969,10 +1107,11 @@ void TProxyStorage::HandleDDiskWriteResponse(
 
             LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
                 "WRITE MULTI-SEGMENT COMPLETE: requestId=" << baseRequestId
+                << " traceId=" << ev->TraceId.GetHexTraceId()
                 << " allComplete=" << allComplete);
 
-            CompleteWriteRequest(ctx, requestCtx);
-            PendingRequests.erase(it);
+        CompleteWriteRequest(ctx, requestCtx);
+        PendingRequests.erase(it);
         }
     } else {
         // Single segment write - original logic
@@ -1044,28 +1183,6 @@ void TProxyStorage::CompleteWriteRequest(
 
     // Reply to original request
     NCloud::Reply(ctx, *requestCtx.OriginalRequest, std::move(response));
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Chunk allocation methods
-
-bool TProxyStorage::FindChunkForOffset(ui64 offset, ui32& chunkId)
-{
-    // Fixed striping logic: consecutive region indices
-    ui64 regionIndex = offset / PartitionState->GetBlockSize();
-
-    TChunkRegionInfo chunkInfo;
-    if (PartitionState->FindChunkForRegion(regionIndex, chunkInfo)) {
-        chunkId = chunkInfo.ChunkId;
-        return true;
-    }
-
-    return false;  // Chunk not found for this region
-}
-
-ui64 TProxyStorage::CalculateRegionIndex(ui64 offset)
-{
-    return PartitionState->CalculateRegionIndex(offset);
 }
 
 

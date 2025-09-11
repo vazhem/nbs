@@ -10,8 +10,10 @@ namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 NCloud::NProto::TError TInMemoryStorage::ReadBlocksLocal(
     const NActors::TActorContext& ctx,
     TRequestInfoPtr requestInfo,
-    std::shared_ptr<NProto::TReadBlocksLocalRequest> request)
+    std::shared_ptr<NProto::TReadBlocksLocalRequest> request,
+    const NWilson::TTraceId& traceId)
 {
+    Y_UNUSED(traceId);
     Y_UNUSED(ctx);
     Y_UNUSED(requestInfo);
 
@@ -46,10 +48,12 @@ NCloud::NProto::TError TInMemoryStorage::ReadBlocksLocal(
 NCloud::NProto::TError TInMemoryStorage::WriteBlocksLocal(
     const NActors::TActorContext& ctx,
     TRequestInfoPtr requestInfo,
-    std::shared_ptr<NProto::TWriteBlocksLocalRequest> request)
+    std::shared_ptr<NProto::TWriteBlocksLocalRequest> request,
+    const NWilson::TTraceId& traceId)
 {
     Y_UNUSED(ctx);
     Y_UNUSED(requestInfo);
+    Y_UNUSED(traceId);
 
     const ui64 startIndex = request->GetStartIndex();
     const ui32 blockCount = request->BlocksCount;
@@ -78,10 +82,12 @@ NCloud::NProto::TError TInMemoryStorage::WriteBlocksLocal(
 NCloud::NProto::TError TInMemoryStorage::ZeroBlocks(
     const NActors::TActorContext& ctx,
     TRequestInfoPtr requestInfo,
-    std::shared_ptr<NProto::TZeroBlocksRequest> request)
+    std::shared_ptr<NProto::TZeroBlocksRequest> request,
+    const NWilson::TTraceId& traceId)
 {
     Y_UNUSED(ctx);
     Y_UNUSED(requestInfo);
+    Y_UNUSED(traceId);
 
     const ui64 startIndex = request->GetStartIndex();
     const ui32 blockCount = request->GetBlocksCount();
