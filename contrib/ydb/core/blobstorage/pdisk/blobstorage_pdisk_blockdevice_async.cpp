@@ -111,6 +111,9 @@ class TRealBlockDevice : public IBlockDevice {
         // Schedule action execution
         // pass action = nullptr to quit
         void Schedule(TCompletionAction *action) noexcept {
+            // Add a mutex to protect the Schedule operation
+            TGuard<TMutex> guard(ScheduleMtx);
+
             TAtomicBase queueActions = AtomicIncrement(QueuedActions);
             if (queueActions >= MaxQueuedActions) {
                 Device.Mon.L7.Set(true, AtomicGetAndIncrement(SeqnoL7));
@@ -126,6 +129,9 @@ class TRealBlockDevice : public IBlockDevice {
         // Schedule action execution
         // pass action = nullptr to quit
         void ScheduleHackForLogReader(TCompletionAction *action) noexcept {
+            // Add a mutex to protect the Schedule operation
+            TGuard<TMutex> guard(ScheduleMtx);
+
             AtomicIncrement(QueuedActions);
             action->Result = EIoResult::Ok;
             CompletionActions.Push(action);
@@ -138,6 +144,7 @@ class TRealBlockDevice : public IBlockDevice {
         TAtomic QueuedActions;
         const TAtomicBase MaxQueuedActions;
         TAtomic SeqnoL7 = 0;
+        TMutex ScheduleMtx; // Mutex to protect Schedule operations
     };
 
     class TSubmitThreadBase : public TThread {
@@ -150,6 +157,9 @@ class TRealBlockDevice : public IBlockDevice {
         // Schedule op execution
         // pass op = nullptr to quit
         void Schedule(IAsyncIoOperation *op) noexcept {
+            // Add a mutex to protect the Schedule operation
+            TGuard<TMutex> scheduleGuard(ScheduleMtx);
+
             if (!op) {
                 SubmitQuitCounter.Increment();
                 SubmitQuitCounter.BlockA();
@@ -191,6 +201,7 @@ class TRealBlockDevice : public IBlockDevice {
         TCountedQueueOneOne<IAsyncIoOperation*, 4 << 10> OperationsToBeSubmit;
         static constexpr TAtomicBase SubmitInFlightBytesMax = 1ull << 15;
         TMutex SubmitMtx;
+        TMutex ScheduleMtx; // Mutex to protect Schedule operations
         TCondVar SubmitCondVar;
         TAtomicBlockCounter SubmitQuitCounter;
     };
@@ -697,12 +708,16 @@ class TRealBlockDevice : public IBlockDevice {
         // Schedule action execution
         // pass action = nullptr to quit
         void Schedule(IAsyncIoOperation *op) noexcept {
+            // Add a mutex to protect the Schedule operation
+            TGuard<TMutex> guard(ScheduleMtx);
+
             TrimOperations.Push(op);
         }
 
     private:
         TCountedQueueOneOne<IAsyncIoOperation*, 4 << 10> TrimOperations;
         TRealBlockDevice &Device;
+        TMutex ScheduleMtx; // Mutex to protect Schedule operations
     };
 
 
@@ -928,6 +943,19 @@ protected:
 
         const ui64 size = op->GetSize();
         const ui64 type = static_cast<ui64>(op->GetType());
+        TCompletionAction *action = static_cast<TCompletionAction*>(op->GetCookie());
+
+        LOG_DEBUG_S(*ActorSystem, NKikimrServices::BS_DEVICE,
+            "🔧 PDISK SUBMIT ENTRY DETAILED: PDiskId=" << PDiskId
+            << " reqId=" << op->GetReqId() << " op=" << (void*)op
+            << " size=" << size << " offset=" << op->GetOffset()
+            << " completionAction=" << (void*)action
+            << " TraceId=" << (action ? action->TraceId.GetHexTraceId() : "NULL")
+            << " OperationIdx=" << (action ? action->OperationIdx : 0)
+            << " SubmitTime=" << (action ? action->SubmitTime : 0)
+            << " opType=" << static_cast<int>(op->GetType())
+            << " UseSpdk=" << (Flags & TDeviceMode::UseSpdk ? "YES" : "NO"));
+
         LWPROBE(PDiskDeviceOperationSizeAndType, GetPDiskId(), size, type);
 
         if (Flags & TDeviceMode::UseSpdk) {
@@ -968,6 +996,11 @@ protected:
             REQUEST_VALGRIND_CHECK_MEM_IS_ADDRESSABLE(data, size);
         }
 
+        LOG_DEBUG_S(*ActorSystem, NKikimrServices::BS_DEVICE,
+            "🔧 PDISK PREAD ASYNC ENTRY: PDiskId=" << PDiskId
+            << " reqId=" << reqId << " offset=" << offset << " size=" << size
+            << " data=" << (void*)data << " completionAction=" << (void*)completionAction);
+
         IAsyncIoOperation* op = IoContext->CreateAsyncIoOperation(completionAction, reqId, traceId);
         IoContext->PreparePRead(op, data, size, offset);
         Submit(op);
@@ -984,6 +1017,11 @@ protected:
             Y_ABORT_UNLESS(intptr_t(data) % 512 == 0);
             REQUEST_VALGRIND_CHECK_MEM_IS_DEFINED(data, size);
         }
+
+        LOG_DEBUG_S(*ActorSystem, NKikimrServices::BS_DEVICE,
+            "🔧 PDISK PWRITE ASYNC ENTRY: PDiskId=" << PDiskId
+            << " reqId=" << reqId << " offset=" << offset << " size=" << size
+            << " data=" << (void*)data << " completionAction=" << (void*)completionAction);
 
         IAsyncIoOperation* op = IoContext->CreateAsyncIoOperation(completionAction, reqId, traceId);
         IoContext->PreparePWrite(op, const_cast<void*>(data), size, offset);

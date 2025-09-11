@@ -342,6 +342,32 @@ void TCompletionChunkRead::Exec(TActorSystem *actorSystem) {
     result->Data.Commit();
 
     Y_ABORT_UNLESS(Read);
+
+    // Log read result data details for verification
+    // TString responseDataPrefix, responseDataSuffix;
+    // if (result->Data.Size() >= 32 && result->Data.IsReadable()) {
+    //     TRcBuf responseDataBuf = result->Data.ToString();
+    //     TString responseDataStr = TString(responseDataBuf.GetData(), responseDataBuf.GetSize());
+    //     for (int i = 0; i < std::min<int>(16, responseDataStr.size()); i++) {
+    //         responseDataPrefix += TStringBuilder() << " " << (ui32)(ui8)responseDataStr[i];
+    //     }
+    //     if (responseDataStr.size() > 16) {
+    //         for (int i = std::max<int>(16, static_cast<int>(responseDataStr.size()-16)); i < static_cast<int>(responseDataStr.size()); i++) {
+    //             responseDataSuffix += TStringBuilder() << " " << (ui32)(ui8)responseDataStr[i];
+    //         }
+    //     }
+    // }
+
+    // LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_PDISK,
+    //     "📥 PDISK READ RESULT: reqId=" << Read->Cookie
+    //     << " chunkIdx=" << Read->ChunkIdx << " originalOffset=" << Read->Offset
+    //     << " size=" << Read->Size << " receivedSize=" << result->Data.Size()
+    //     << " owner=" << Read->Owner << " ownerRound=" << Read->OwnerRound
+    //     << " to=" << Read->Sender.ToString()
+    //     << " pdiskId=" << PDisk->PDiskId
+    //     << " dataPrefix[" << responseDataPrefix << " ]"
+    //     << " dataSuffix[" << responseDataSuffix << " ]");
+
     LOG_DEBUG_S(*actorSystem, NKikimrServices::BS_PDISK, "PDiskId# " << PDisk->PDiskId << " ReqId# " << Read->ReqId.Id
             << " " << result->ToString() << " To# " << Read->Sender.LocalId());
 

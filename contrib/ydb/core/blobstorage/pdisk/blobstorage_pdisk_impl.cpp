@@ -1411,6 +1411,18 @@ void TPDisk::ChunkReserve(TChunkReserve &evChunkReserve) {
         result = MakeHolder<NPDisk::TEvChunkReserveResult>(NKikimrProto::OK, 0);
         result->ChunkIds = std::move(chunks);
         result->StatusFlags = GetStatusFlags(evChunkReserve.Owner, evChunkReserve.OwnerGroupType);
+
+        // POPULATE DEVICE INFO FOR DDISK DIRECT I/O ACCESS
+        result->BlockDevice = BlockDevice.Get();  // Share PDisk's block device interface
+        result->DevicePath = Cfg->GetDevicePath();
+        result->ChunkSize = Format.ChunkSize;
+        result->ChunkDeviceOffsets.resize(result->ChunkIds.size());
+
+        for (size_t i = 0; i < result->ChunkIds.size(); i++) {
+            TChunkIdx chunkIdx = result->ChunkIds[i];
+            // Calculate device offset using PDisk format
+            result->ChunkDeviceOffsets[i] = Format.Offset(chunkIdx, 0);
+        }
     }
 
     // Copy the cookie from the original request

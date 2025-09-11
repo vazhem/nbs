@@ -114,6 +114,7 @@ class TAsyncIoContextLibaio : public IAsyncIoContext {
     io_context_t IoContext;
     TActorSystem *ActorSystem;
     TPool<TAsyncIoOperation, 1024> Pool;
+    TMutex PoolMutex; // Mutex to protect Pool operations
     THolder<TFileHandle> File;
     int LastErrno = 0;
 
@@ -136,12 +137,18 @@ public:
     }
 
     IAsyncIoOperation* CreateAsyncIoOperation(void* cookie, TReqId reqId, NWilson::TTraceId *traceId) override {
+        // Use the instance mutex to protect the Pool.Pop() operation
+        TGuard<TMutex> guard(PoolMutex);
+
         void *p = Pool.Pop();
         IAsyncIoOperation *operation = new (p) TAsyncIoOperation(cookie, reqId, traceId);
         return operation;
     }
 
     void DestroyAsyncIoOperation(IAsyncIoOperation* operation) override {
+        // Use the instance mutex to protect the Pool.Push() operation
+        TGuard<TMutex> guard(PoolMutex);
+
         Pool.Push(static_cast<TAsyncIoOperation*>(operation));
     }
 
@@ -453,6 +460,7 @@ struct TAsyncIoOperationLiburing : IAsyncIoOperation {
 class TAsyncIoContextLiburing : public IAsyncIoContext {
     TActorSystem *ActorSystem = nullptr;
     TPool<TAsyncIoOperationLiburing, 1024> Pool;
+    TMutex PoolMutex; // Mutex to protect Pool operations
     THolder<TFileHandle> File;
     int LastErrno = 0;
 
@@ -474,11 +482,17 @@ public:
     }
 
     IAsyncIoOperation* CreateAsyncIoOperation(void* cookie, TReqId reqId, NWilson::TTraceId *traceId) override {
+        // Use the instance mutex to protect the Pool.Pop() operation
+        TGuard<TMutex> guard(PoolMutex);
+
         void *p = Pool.Pop();
         return new (p) TAsyncIoOperationLiburing(cookie, reqId, traceId);
     }
 
     void DestroyAsyncIoOperation(IAsyncIoOperation* op) override {
+        // Use the instance mutex to protect the Pool.Push() operation
+        TGuard<TMutex> guard(PoolMutex);
+
         Pool.Push(static_cast<TAsyncIoOperationLiburing*>(op));
     }
 
@@ -546,7 +560,7 @@ public:
         tOp->IsReadOp = true;
         tOp->DataPtr = destination;
         tOp->DataSize = size;
-        tOp->DataOffset = offset; 
+        tOp->DataOffset = offset;
     }
 
     void PreparePWrite(IAsyncIoOperation *op, const void *source, size_t size, size_t offset) override {
