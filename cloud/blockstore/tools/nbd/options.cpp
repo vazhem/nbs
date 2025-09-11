@@ -223,17 +223,37 @@ void TOptions::Parse(int argc, char** argv)
         .NoArgument()
         .SetFlag(&Netlink);
 
+    opts.AddLongOption("disconnect", "disconnect NBD device")
+        .RequiredArgument("STR")
+        .Handler1T<TString>([this] (const auto& path) {
+            Disconnect = true;
+            ConnectDevicePath = path;
+        });
+
+    opts.AddCharOption('d', "disconnect NBD device (short form)")
+        .RequiredArgument("STR")
+        .Handler1T<TString>([this] (const auto& path) {
+            Disconnect = true;
+            ConnectDevicePath = path;
+        });
+
     TOptsParseResultException res(&opts, argc, argv);
 
     if (res.Has(&verbose) && !VerboseLevel) {
         VerboseLevel = "debug";
     }
 
-    Y_ENSURE(DeviceMode == EDeviceMode::Null || DiskId);
+    // Skip disk-id requirement for disconnect mode
+    if (!Disconnect) {
+        Y_ENSURE(DeviceMode == EDeviceMode::Null || DiskId);
 
-    if (DeviceMode == EDeviceMode::Endpoint) {
-        Y_ENSURE(ListenUnixSocketPath,
-            "'--listen-path' option is required for endpoint device-mode");
+        if (DeviceMode == EDeviceMode::Endpoint) {
+            Y_ENSURE(ListenUnixSocketPath,
+                "'--listen-path' option is required for endpoint device-mode");
+        }
+    } else {
+        // For disconnect mode, we need device path
+        Y_ENSURE(ConnectDevicePath, "device path is required for disconnect mode");
     }
 
     if (res.Has(&device)) {

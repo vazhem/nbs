@@ -46,7 +46,10 @@
 #include <util/generic/guid.h>
 #include <util/stream/file.h>
 #include <util/string/strip.h>
+#include <util/system/file.h>
 #include <util/system/hostname.h>
+
+#include <sys/ioctl.h>
 
 namespace NCloud::NBlockStore::NBD {
 
@@ -55,6 +58,14 @@ using namespace NThreading;
 using namespace NCloud::NBlockStore::NClient;
 
 namespace {
+
+////////////////////////////////////////////////////////////////////////////////
+
+enum {
+    NBD_CLEAR_SOCK              = _IO(0xAB, 4),
+    NBD_CLEAR_QUE               = _IO(0xAB, 5),
+    NBD_DISCONNECT              = _IO(0xAB, 8),
+};
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -117,6 +128,21 @@ TBootstrap::~TBootstrap()
 
 void TBootstrap::Init()
 {
+    // For disconnect mode, only initialize logging
+    if (Options->Disconnect) {
+        TLogSettings logSettings;
+        if (Options->VerboseLevel) {
+            auto level = GetLogLevel(Options->VerboseLevel);
+            if (!level) {
+                ythrow yexception()
+                    << "unknown log level: " << Options->VerboseLevel.Quote();
+            }
+            logSettings.FiltrationLevel = *level;
+        }
+        Logging = CreateLoggingService("console", logSettings);
+        return;
+    }
+
     InitLWTrace();
 
     InitClientConfig();
@@ -253,6 +279,16 @@ void TBootstrap::InitLWTrace()
 
 void TBootstrap::Start()
 {
+    // Handle disconnect mode early - no need to start services
+    if (Options->Disconnect) {
+        // Only start logging for disconnect mode
+        if (Logging) {
+            Logging->Start();
+        }
+        DisconnectDevice();
+        return;
+    }
+
     if (Logging) {
         Logging->Start();
     }
@@ -333,6 +369,14 @@ void TBootstrap::Start()
 
 void TBootstrap::Stop()
 {
+    // For disconnect mode, only stop logging
+    if (Options->Disconnect) {
+        if (Logging) {
+            Logging->Stop();
+        }
+        return;
+    }
+
     if (NbdDevice) {
         NbdDevice->Stop(true);
     }
@@ -566,6 +610,35 @@ void TBootstrap::StopNbdEndpoint()
         std::move(ctx),
         std::move(request));
     CheckError(future.GetValue(WaitTimeout));
+}
+
+void TBootstrap::DisconnectDevice()
+{
+    auto log = Logging ? Logging->CreateLog("BLOCKSTORE_NBD") : TLog();
+
+    if (log.IsOpen()) {
+        log << TLOG_INFO << "Disconnecting NBD device: " << Options->ConnectDevicePath << Endl;
+    }
+
+    try {
+        TFileHandle device(Options->ConnectDevicePath, OpenExisting | RdWr);
+
+        if (!device.IsOpen()) {
+            ythrow TFileError() << "cannot open " << Options->ConnectDevicePath;
+        }
+
+        // Clear any queued requests and disconnect the device
+        ioctl(device, NBD_CLEAR_QUE);
+        ioctl(device, NBD_DISCONNECT);
+        ioctl(device, NBD_CLEAR_SOCK);
+
+        if (log.IsOpen()) {
+            log << TLOG_INFO << "Successfully disconnected " << Options->ConnectDevicePath << Endl;
+        }
+    } catch (const std::exception& e) {
+        ythrow yexception() << "Failed to disconnect " << Options->ConnectDevicePath
+                           << ": " << e.what();
+    }
 }
 
 }   // namespace NCloud::NBlockStore::NBD

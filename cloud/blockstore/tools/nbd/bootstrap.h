@@ -64,6 +64,8 @@ private:
 
     void StartNbdEndpoint();
     void StopNbdEndpoint();
+
+    void DisconnectDevice();
 };
 
 }   // namespace NCloud::NBlockStore::NBD
