@@ -63,6 +63,9 @@ private:
     const TDiagnosticsConfigPtr DiagnosticsConfig;
     std::unique_ptr<TPartitionState> State;
 
+    // Storage type flag
+    EStorageType StorageType = EStorageType::Proxy;
+
     // State machine
     EPartitionState CurrentState = EPartitionState::Boot;
     ui32 RetryCount = 0;

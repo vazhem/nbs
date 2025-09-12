@@ -57,12 +57,17 @@ TPartitionActor::TPartitionActor(
 {
     Y_UNUSED(owner);
 
-    // Initialize the proxy storage for the state
-    auto proxyStorage = std::make_shared<TProxyStorage>(
-        PartitionConfig.GetBlockSize(),
-        SelfId(),
-        State.get());
-    State->SetStorage(proxyStorage);
+    // Initialize storage based on the storage type flag
+    TPartitionStoragePtr partitionStorage;
+    if (StorageType == EStorageType::Memory) {
+        partitionStorage = std::make_shared<TInMemoryStorage>(PartitionConfig.GetBlockSize());
+    } else {
+        partitionStorage = std::make_shared<TProxyStorage>(
+            PartitionConfig.GetBlockSize(),
+            SelfId(),
+            State.get());
+    }
+    State->SetStorage(partitionStorage);
 }
 
 TString TPartitionActor::GetStateName(ui32 state)

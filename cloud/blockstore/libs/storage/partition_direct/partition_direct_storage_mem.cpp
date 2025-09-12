@@ -1,5 +1,7 @@
 #include <cloud/blockstore/libs/storage/core/proto_helpers.h>
+#include <cloud/blockstore/libs/storage/api/service.h>
 #include <cloud/storage/core/libs/common/error.h>
+#include <cloud/storage/core/libs/actors/helpers.h>
 
 #include "partition_direct_storage_mem.h"
 
@@ -14,8 +16,6 @@ NCloud::NProto::TError TInMemoryStorage::ReadBlocksLocal(
     const NWilson::TTraceId& traceId)
 {
     Y_UNUSED(traceId);
-    Y_UNUSED(ctx);
-    Y_UNUSED(requestInfo);
 
     const ui64 startIndex = request->GetStartIndex();
     const ui32 blockCount = request->GetBlocksCount();
@@ -42,6 +42,15 @@ NCloud::NProto::TError TInMemoryStorage::ReadBlocksLocal(
         dst += request->BlockSize;
     }
 
+    // Send success response - data is already in the request's sglist
+    LOG_DEBUG(ctx, TBlockStoreComponents::PARTITION,
+        "InMemoryStorage: ReadBlocksLocal completed - startIndex: %lu, blockCount: %u",
+        startIndex, blockCount);
+
+    auto response = std::make_unique<TEvService::TEvReadBlocksLocalResponse>();
+    response->Record.MutableError()->CopyFrom(NCloud::MakeError(S_OK));
+    NCloud::Reply(ctx, *requestInfo, std::move(response));
+
     return NCloud::MakeError(S_OK);
 }
 
@@ -51,8 +60,6 @@ NCloud::NProto::TError TInMemoryStorage::WriteBlocksLocal(
     std::shared_ptr<NProto::TWriteBlocksLocalRequest> request,
     const NWilson::TTraceId& traceId)
 {
-    Y_UNUSED(ctx);
-    Y_UNUSED(requestInfo);
     Y_UNUSED(traceId);
 
     const ui64 startIndex = request->GetStartIndex();
@@ -76,6 +83,15 @@ NCloud::NProto::TError TInMemoryStorage::WriteBlocksLocal(
         src += request->BlockSize;
     }
 
+    // Send success response
+    LOG_DEBUG(ctx, TBlockStoreComponents::PARTITION,
+        "InMemoryStorage: WriteBlocksLocal completed - startIndex: %lu, blockCount: %u",
+        startIndex, blockCount);
+
+    auto response = std::make_unique<TEvService::TEvWriteBlocksLocalResponse>();
+    response->Record.MutableError()->CopyFrom(NCloud::MakeError(S_OK));
+    NCloud::Reply(ctx, *requestInfo, std::move(response));
+
     return NCloud::MakeError(S_OK);
 }
 
@@ -85,8 +101,6 @@ NCloud::NProto::TError TInMemoryStorage::ZeroBlocks(
     std::shared_ptr<NProto::TZeroBlocksRequest> request,
     const NWilson::TTraceId& traceId)
 {
-    Y_UNUSED(ctx);
-    Y_UNUSED(requestInfo);
     Y_UNUSED(traceId);
 
     const ui64 startIndex = request->GetStartIndex();
@@ -97,6 +111,15 @@ NCloud::NProto::TError TInMemoryStorage::ZeroBlocks(
         ui64 blockIndex = startIndex + i;
         Blocks[blockIndex] = zeroBlock;
     }
+
+    // Send success response - ZeroBlocks uses WriteBlocksLocalResponse
+    LOG_DEBUG(ctx, TBlockStoreComponents::PARTITION,
+        "InMemoryStorage: ZeroBlocks completed - startIndex: %lu, blockCount: %u",
+        startIndex, blockCount);
+
+    auto response = std::make_unique<TEvService::TEvWriteBlocksLocalResponse>();
+    response->Record.MutableError()->CopyFrom(NCloud::MakeError(S_OK));
+    NCloud::Reply(ctx, *requestInfo, std::move(response));
 
     return NCloud::MakeError(S_OK);
 }
