@@ -1537,16 +1537,17 @@ void TPartitionActor::CompletePreallocateVolumeChunks(
         };
         State->AddAvailableChunkToCache(chunkInfo);
 
-        // Add to region-aware cache - FIXED: Use consistent region mapping
+        // Add to region-aware cache - Use consistent region mapping
         State->AddRegionMapping(targetRegionIndex, args.GroupIndex, chunkId, args.DDiskServiceId);
 
         LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
-            "🔧 FIXED ALLOCATION: chunk " << chunkId
+            "🔧 CHUNK ALLOCATION:"
+            << " DDisk=" << args.DDiskServiceId
+            << " chunk " << chunkId
             << " -> region " << targetRegionIndex
             << " group " << args.GroupIndex
             << " logicalIndex=" << logicalChunkIndexInGroup
-            << " (was using inconsistent baseIndex+counter)"
-            << " DDisk=" << args.DDiskServiceId);
+            );
 
         chunkCounter++;
     }
@@ -1554,7 +1555,7 @@ void TPartitionActor::CompletePreallocateVolumeChunks(
     LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
         "[" << TabletID() << "] Pre-allocated and assigned " << args.ChunkIds.size()
         << " chunks from DDisk " << args.DDiskServiceId
-        << " to group " << args.GroupIndex << " (distributed across regions)");
+        << " to group " << args.GroupIndex);
 
     // Check if all needed regions are fully allocated
     ui32 regionsCompleted = 0;

@@ -96,13 +96,13 @@ struct TRegionChunkMapping {
 
     TRegionChunkMapping() = default;
 
-    TRegionChunkMapping(ui64 regionIndex, ui64 startOffset, ui64 endOffset)
+    TRegionChunkMapping(ui64 regionIndex, ui64 startOffset, ui64 endOffset, ui32 groupsCount)
         : RegionIndex(regionIndex)
         , StartOffset(startOffset)
         , EndOffset(endOffset)
     {
-        ChunkIds.resize(16);  // GROUPS_COUNT
-        DDiskServiceIds.resize(16);
+        ChunkIds.resize(groupsCount);
+        DDiskServiceIds.resize(groupsCount);
     }
 };
 
@@ -151,6 +151,10 @@ private:
 public:
     // Number of DDisk actors in the group from config
     static constexpr ui32 DDISK_COUNT = 2;
+
+    // Striping constants for multi-group operations
+    static constexpr ui64 STRIPE_SIZE = 512 * 1024;  // 512KB stripe size (legacy)
+    static constexpr ui32 GROUPS_COUNT = 32;             // number of groups
 
     // Constructor
     TPartitionState(
@@ -321,10 +325,6 @@ public:
     // Chunk management methods
     //
 
-    // Striping constants for multi-group operations
-    static constexpr ui64 STRIPE_SIZE = 512 * 1024;  // 512KB stripe size (legacy)
-    static constexpr ui32 GROUPS_COUNT = 16;             // number of groups
-
     // Region-based methods
     ui64 GetRegionSize() const {
         return static_cast<ui64>(GROUPS_COUNT) * ChunkSize;
@@ -453,7 +453,7 @@ public:
             // Initialize new region
             ui64 startOffset = regionIndex * GetRegionSize();
             ui64 endOffset = startOffset + GetRegionSize() - 1;
-            regionMapping = TRegionChunkMapping(regionIndex, startOffset, endOffset);
+            regionMapping = TRegionChunkMapping(regionIndex, startOffset, endOffset, GROUPS_COUNT);
         }
 
         regionMapping.ChunkIds[groupIndex] = chunkId;
@@ -525,7 +525,7 @@ public:
                     if (regionMapping.ChunkIds.empty()) {
                         ui64 startOffset = regionIndex * GetRegionSize();
                         ui64 endOffset = startOffset + GetRegionSize() - 1;
-                        regionMapping = TRegionChunkMapping(regionIndex, startOffset, endOffset);
+                        regionMapping = TRegionChunkMapping(regionIndex, startOffset, endOffset, GROUPS_COUNT);
                     }
                     regionMapping.ChunkIds[groupWithinRegion] = region.ChunkId;
                     regionMapping.DDiskServiceIds[groupWithinRegion] = region.DDiskServiceId;
