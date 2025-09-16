@@ -8,6 +8,7 @@
 
 #include "partition_direct_actor.h"
 #include "partition_direct_state.h"
+#include "partition_direct_worker.h"
 
 namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 
@@ -145,47 +146,27 @@ void TPartitionActor::HandleReadBlocksLocalRequest(
     ui64 requestId = ev->Get()->CallContext->RequestId;
 
     LOG_DEBUG(ctx, TBlockStoreComponents::PARTITION,
-        "Received ReadBlocksLocal request #%lu (offset: %lu, count: %lu, bs: %lu)",
+        "[%lu] Forwarding ReadBlocksLocal request #%lu (offset: %lu, count: %lu, bs: %lu) to worker",
+        TabletID(),
         requestId,
         record.GetStartIndex(),
         record.GetBlocksCount(),
         record.BlockSize);
 
-    auto guard = record.Sglist.Acquire();
-    if (!guard) {
+    // Select worker in round-robin fashion
+    auto workerId = SelectNextWorker();
+    if (!workerId) {
+        LOG_ERROR(ctx, TBlockStoreComponents::PARTITION,
+            "[%lu] No workers available for ReadBlocksLocal request #%lu",
+            TabletID(), requestId);
         auto response = std::make_unique<TEvService::TEvReadBlocksLocalResponse>(
-            MakeError(E_CANCELLED, "Failed to acquire sglist"));
+            MakeError(E_REJECTED, "No workers available"));
         NCloud::Reply(ctx, *ev, std::move(response));
         return;
     }
 
-    // Create request info from original event to preserve sender/cookie/context
-    auto requestInfo = CreateRequestInfo(ev->Sender, ev->Cookie, ev->Get()->CallContext);
-
-    // Создаем новый trace id с параметрами по умолчанию
-    NWilson::TTraceId trace = NWilson::TTraceId::NewTraceId(1, 4095);
-
-    // Логируем соответствие между requestId и сгенерированным trace id
-    LOG_DEBUG(ctx, TBlockStoreComponents::PARTITION,
-        "ReadBlocks: requestId=%lu -> traceId=%s",
-        requestId,
-        trace.GetHexTraceId().c_str());
-
-    auto error = State->ReadBlocks(
-        ctx,
-        requestInfo,
-        record.GetStartIndex(),
-        record.blockscount(),
-        {const_cast<char*>(guard.Get()[0].Data()),
-         record.blockscount() * State->GetBlockSize()},
-        trace);
-
-    // Handle errors from storage operations
-    if (NCloud::HasError(error)) {
-        auto response = std::make_unique<TEvService::TEvReadBlocksLocalResponse>(error);
-        NCloud::Reply(ctx, *ev, std::move(response));
-        return;
-    }
+    // Forward the entire event to the selected worker
+    ctx.Send(ev->Forward(workerId));
 }
 
 void TPartitionActor::HandleWriteBlocksLocalRequest(
@@ -199,47 +180,27 @@ void TPartitionActor::HandleWriteBlocksLocalRequest(
     ui64 requestId = ev->Get()->CallContext->RequestId;
 
     LOG_DEBUG(ctx, TBlockStoreComponents::PARTITION,
-        "Received WriteBlocksLocal request #%lu (offset: %lu, count: %lu, bs: %lu)",
+        "[%lu] Forwarding WriteBlocksLocal request #%lu (offset: %lu, count: %lu, bs: %lu) to worker",
+        TabletID(),
         requestId,
         record.GetStartIndex(),
         record.BlocksCount,
         record.BlockSize);
 
-    auto guard = record.Sglist.Acquire();
-    if (!guard) {
+    // Select worker in round-robin fashion
+    auto workerId = SelectNextWorker();
+    if (!workerId) {
+        LOG_ERROR(ctx, TBlockStoreComponents::PARTITION,
+            "[%lu] No workers available for WriteBlocksLocal request #%lu",
+            TabletID(), requestId);
         auto response = std::make_unique<TEvService::TEvWriteBlocksLocalResponse>(
-            MakeError(E_CANCELLED, "Failed to acquire sglist"));
+            MakeError(E_REJECTED, "No workers available"));
         NCloud::Reply(ctx, *ev, std::move(response));
         return;
     }
 
-    // Create request info from original event to preserve sender/cookie/context
-    auto requestInfo = CreateRequestInfo(ev->Sender, ev->Cookie, ev->Get()->CallContext);
-
-    // Создаем новый trace id с параметрами по умолчанию
-    NWilson::TTraceId trace = NWilson::TTraceId::NewTraceId(1, 4095);
-
-    // Логируем соответствие между requestId и сгенерированным trace id
-    LOG_DEBUG(ctx, TBlockStoreComponents::PARTITION,
-        "WriteBlocks: requestId=%lu -> traceId=%s",
-        requestId,
-        trace.GetHexTraceId().c_str());
-
-    auto error = State->WriteBlocks(
-        ctx,
-        requestInfo,
-        record.GetStartIndex(),
-        record.BlocksCount,
-        {const_cast<char*>(guard.Get()[0].Data()),
-         record.BlocksCount * State->GetBlockSize()},
-        trace);
-
-    // Handle errors from storage operations
-    if (NCloud::HasError(error)) {
-        auto response = std::make_unique<TEvService::TEvWriteBlocksLocalResponse>(error);
-        NCloud::Reply(ctx, *ev, std::move(response));
-        return;
-    }
+    // Forward the entire event to the selected worker
+    ctx.Send(ev->Forward(workerId));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1115,6 +1076,7 @@ void TPartitionActor::TransitionToState(EPartitionState newState, const NActors:
         case EPartitionState::Ready:
             LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
                 "[" << TabletID() << "] Partition fully initialized and ready for IO");
+            CreateWorkerPool(ctx);
             break;
 
         case EPartitionState::Boot:
@@ -1649,6 +1611,86 @@ void TPartitionActor::CompleteAllocateChunkForRegion(
             "[" << TabletID() << "] Successfully allocated chunk " << args.ChunkId
             << " for region starting at offset " << args.StartOffset);
     }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Worker pool management
+
+void TPartitionActor::CreateWorkerPool(const NActors::TActorContext& ctx)
+{
+    if (!WorkerActors.empty()) {
+        LOG_WARN_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Worker pool already exists, skipping creation");
+        return;
+    }
+
+    // Get worker count from config (use default if not specified)
+    ui32 workerCount = DEFAULT_WORKER_COUNT;
+    // TODO: Add config parameter for worker count
+
+    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Creating worker pool with " << workerCount << " workers");
+
+    WorkerActors.reserve(workerCount);
+
+    // Create worker config with thread-safe copies of needed data
+    TWorkerStorageConfig config;
+    config.BlockSize = State->GetBlockSize();
+    config.BlockCount = State->GetBlockCount();
+    config.ChunkSize = State->GetChunkSize();
+    config.DDiskServiceIds = State->GetDDiskServiceIds();  // Copy DDisk service IDs
+
+    // Copy region chunk cache for thread safety
+    THashMap<ui64, TRegionChunkMapping> regionCache;
+    ui64 totalRegions = State->GetTotalRegionsNeeded();
+    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Copying " << totalRegions << " regions to worker config");
+
+    for (ui64 i = 0; i < totalRegions; ++i) {
+        TRegionChunkMapping mapping;
+        if (State->GetRegionMapping(i, mapping)) {
+            regionCache[i] = mapping;
+            LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+                "[" << TabletID() << "] Region " << i << " has " << mapping.ChunkIds.size() << " chunks");
+        } else {
+            LOG_WARN_S(ctx, TBlockStoreComponents::PARTITION,
+                "[" << TabletID() << "] Failed to get region mapping for region " << i);
+        }
+    }
+    config.RegionChunkCache = std::move(regionCache);
+
+    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Worker config populated with " << config.RegionChunkCache.size()
+        << " regions, ChunkSize=" << config.ChunkSize);
+
+    // Create group-to-DDisk mapping
+    for (const auto& ddiskInfo : State->GetDDiskInfos()) {
+        config.GroupToDDiskIds[ddiskInfo.GroupIndex].push_back(ddiskInfo.ServiceId);
+    }
+
+    for (ui32 i = 0; i < workerCount; ++i) {
+        auto worker = std::unique_ptr<NActors::IActor>(CreatePartitionDirectWorkerActor(i, config));
+
+        auto workerId = NCloud::Register(ctx, std::move(worker));
+        WorkerActors.push_back(workerId);
+
+        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Created worker " << i << " with ActorId: " << workerId.ToString());
+    }
+
+    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Successfully created " << WorkerActors.size() << " worker actors");
+}
+
+NActors::TActorId TPartitionActor::SelectNextWorker()
+{
+    if (WorkerActors.empty()) {
+        return NActors::TActorId();
+    }
+
+    auto workerId = WorkerActors[NextWorkerIndex];
+    NextWorkerIndex = (NextWorkerIndex + 1) % WorkerActors.size();
+    return workerId;
 }
 
 }   // namespace NCloud::NBlockStore::NStorage::NPartitionDirect

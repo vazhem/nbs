@@ -16,6 +16,7 @@
 #include "partition_direct_state.h"
 #include "partition_direct_database.h"
 #include "partition_direct_tx.h"
+#include "partition_direct_worker.h"
 
 namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 
@@ -71,6 +72,11 @@ private:
     ui32 RetryCount = 0;
     static constexpr ui32 MAX_RETRIES = 10;
     static constexpr ui32 RETRY_DELAY_MS = 1000;  // 1 second
+
+    // Worker pool
+    TVector<NActors::TActorId> WorkerActors;
+    ui32 NextWorkerIndex = 0;
+    static constexpr ui32 DEFAULT_WORKER_COUNT = 32;
 
 public:
     TPartitionActor(
@@ -169,6 +175,10 @@ private:
     void RequestAllVolumeChunks(const NActors::TActorContext& ctx);
     ui64 CalculateRegionIndex(ui64 offset);
     ui64 CalculateRegionStartOffset(ui64 regionIndex);
+
+    // Worker pool management
+    void CreateWorkerPool(const NActors::TActorContext& ctx);
+    NActors::TActorId SelectNextWorker();
 
 private:
     BLOCKSTORE_PARTITION_DIRECT_TRANSACTIONS(BLOCKSTORE_IMPLEMENT_TRANSACTION, TTxPartitionDirect)

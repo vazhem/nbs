@@ -7,6 +7,7 @@ SRCS(
     partition_direct_state.cpp
     partition_direct_storage_mem.cpp
     partition_direct_storage_proxy.cpp
+    partition_direct_worker.cpp
 )
 
 PEERDIR(
