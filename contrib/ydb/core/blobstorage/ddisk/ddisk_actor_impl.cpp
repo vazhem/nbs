@@ -9,6 +9,10 @@
 #include <contrib/ydb/library/services/services.pb.h>
 #include <contrib/ydb/core/blobstorage/pdisk/blobstorage_pdisk.h>
 #include <contrib/ydb/library/pdisk_io/buffers.h>
+#include <contrib/ydb/core/blobstorage/pdisk/blobstorage_pdisk_util_devicemode.h>
+#include <contrib/ydb/core/blobstorage/pdisk/blobstorage_pdisk_mon.h>
+#include <contrib/ydb/core/blobstorage/pdisk/blobstorage_pdisk_config.h>
+#include <contrib/ydb/library/pdisk_io/sector_map.h>
 
 namespace NKikimr {
 
@@ -498,10 +502,17 @@ TDDiskWorkerConfig TDDiskActorImpl::CreateWorkerConfig() const
 {
     TDDiskWorkerConfig config;
     config.Mode = Mode;
-    config.BlockDevice = BlockDevice;
+    config.DevicePath = DevicePath;  // Pass device path for monitoring/debugging
     config.ChunkSize = ChunkSize;
     config.SelfVDiskId = SelfVDiskId;
     config.VDiskSlotId = Config->BaseInfo.VDiskSlotId;
+
+    // Get shared file handle from PDisk's BlockDevice for DDisk workers
+    if (BlockDevice) {
+        config.SharedFileHandle = BlockDevice->GetFileHandle();
+    } else {
+        config.SharedFileHandle = nullptr;
+    }
 
     // Copy chunk info map for thread safety
     config.ChunkInfoMap = ChunkInfoMap;

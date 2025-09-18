@@ -114,8 +114,9 @@ class TAsyncIoContextLibaio : public IAsyncIoContext {
     io_context_t IoContext;
     TActorSystem *ActorSystem;
     TPool<TAsyncIoOperation, 1024> Pool;
-    TMutex PoolMutex; // Mutex to protect Pool operations
     THolder<TFileHandle> File;
+    TFileHandle *SharedFileHandle = nullptr;
+    bool OwnsFileHandle = true;  // Whether this instance owns the file handle
     int LastErrno = 0;
 
     TPDiskDebugInfo PDiskInfo;
@@ -124,6 +125,19 @@ public:
     TAsyncIoContextLibaio(const TString &path, ui32 pDiskId, TDeviceMode::TFlags flags)
         : IoContext(nullptr)
         , ActorSystem(nullptr)
+        , SharedFileHandle(nullptr)
+        , OwnsFileHandle(true)
+        , PDiskInfo(path, pDiskId, "libaio")
+    {
+        Y_UNUSED(flags);
+    }
+
+    // Constructor with shared file handle
+    TAsyncIoContextLibaio(TFileHandle *fileHandle, const TString &path, ui32 pDiskId, TDeviceMode::TFlags flags)
+        : IoContext(nullptr)
+        , ActorSystem(nullptr)
+        , SharedFileHandle(fileHandle)
+        , OwnsFileHandle(false)
         , PDiskInfo(path, pDiskId, "libaio")
     {
         Y_UNUSED(flags);
@@ -137,18 +151,12 @@ public:
     }
 
     IAsyncIoOperation* CreateAsyncIoOperation(void* cookie, TReqId reqId, NWilson::TTraceId *traceId) override {
-        // Use the instance mutex to protect the Pool.Pop() operation
-        TGuard<TMutex> guard(PoolMutex);
-
         void *p = Pool.Pop();
         IAsyncIoOperation *operation = new (p) TAsyncIoOperation(cookie, reqId, traceId);
         return operation;
     }
 
     void DestroyAsyncIoOperation(IAsyncIoOperation* operation) override {
-        // Use the instance mutex to protect the Pool.Push() operation
-        TGuard<TMutex> guard(PoolMutex);
-
         Pool.Push(static_cast<TAsyncIoOperation*>(operation));
     }
 
@@ -163,7 +171,7 @@ public:
                                  << " strerror# " << strerror(-ret));
             }
         }
-        if (File) {
+        if (File && OwnsFileHandle) {
             ret = File->Flock(LOCK_UN);
             Y_VERIFY_S(ret == 0, "Error in Flock(LOCK_UN), errno# " << errno << " strerror# " << strerror(errno));
             bool isOk = File->Close();
@@ -306,24 +314,33 @@ public:
     }
 
     EIoResult Setup(ui64 maxEvents, bool doLock) override {
-        File = MakeHolder<TFileHandle>(PDiskInfo.Path.c_str(),
-            OpenExisting | RdWr | DirectAligned | Sync);
-        bool isFileOpened = File->IsOpen();
-        if (isFileOpened) {
-            if (doLock) {
-                int ret = LockFile();
-                if (ret == -1) {
-                    return EIoResult::FileLockError;
-                }
-            }
+        bool isFileOpened = false;
+
+        if (SharedFileHandle) {
+            // For clients using shared file handle
+            File.Reset(SharedFileHandle);
+            isFileOpened = File->IsOpen();
         } else {
-            int fd = open(PDiskInfo.Path.c_str(), O_RDWR);
-            if (fd < 0) {
-                LastErrno = errno;
-                return EIoResult::FileOpenError;
+            // Create own file handle
+            File = MakeHolder<TFileHandle>(PDiskInfo.Path.c_str(),
+                OpenExisting | RdWr | DirectAligned | Sync);
+            isFileOpened = File->IsOpen();
+            if (isFileOpened) {
+                if (doLock) {
+                    int ret = LockFile();
+                    if (ret == -1) {
+                        return EIoResult::FileLockError;
+                    }
+                }
             } else {
-                close(fd);
-                return EIoResult::TryAgain;
+                int fd = open(PDiskInfo.Path.c_str(), O_RDWR);
+                if (fd < 0) {
+                    LastErrno = errno;
+                    return EIoResult::FileOpenError;
+                } else {
+                    close(fd);
+                    return EIoResult::TryAgain;
+                }
             }
         }
 
@@ -460,7 +477,6 @@ struct TAsyncIoOperationLiburing : IAsyncIoOperation {
 class TAsyncIoContextLiburing : public IAsyncIoContext {
     TActorSystem *ActorSystem = nullptr;
     TPool<TAsyncIoOperationLiburing, 1024> Pool;
-    TMutex PoolMutex; // Mutex to protect Pool operations
     THolder<TFileHandle> File;
     int LastErrno = 0;
 
@@ -482,17 +498,11 @@ public:
     }
 
     IAsyncIoOperation* CreateAsyncIoOperation(void* cookie, TReqId reqId, NWilson::TTraceId *traceId) override {
-        // Use the instance mutex to protect the Pool.Pop() operation
-        TGuard<TMutex> guard(PoolMutex);
-
         void *p = Pool.Pop();
         return new (p) TAsyncIoOperationLiburing(cookie, reqId, traceId);
     }
 
     void DestroyAsyncIoOperation(IAsyncIoOperation* op) override {
-        // Use the instance mutex to protect the Pool.Push() operation
-        TGuard<TMutex> guard(PoolMutex);
-
         Pool.Push(static_cast<TAsyncIoOperationLiburing*>(op));
     }
 
@@ -726,6 +736,11 @@ public:
 std::unique_ptr<IAsyncIoContext> CreateAsyncIoContextReal(const TString &path, ui32 pDiskId, TDeviceMode::TFlags flags) {
     // TODO: choose TAsyncIoContextLibaio or TAsyncIoContextLiburing here
     return std::make_unique<TAsyncIoContextLibaio>(path, pDiskId, flags);
+}
+
+std::unique_ptr<IAsyncIoContext> CreateAsyncIoContextRealWithFile(TFileHandle *fileHandle, const TString &path, ui32 pDiskId, TDeviceMode::TFlags flags) {
+    // TODO: choose TAsyncIoContextLibaio or TAsyncIoContextLiburing here
+    return std::make_unique<TAsyncIoContextLibaio>(fileHandle, path, pDiskId, flags);
 }
 
 } // NPDisk

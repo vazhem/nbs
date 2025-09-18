@@ -60,15 +60,27 @@ public:
     virtual void SetWriteCache(bool isEnable) = 0;
     virtual void Stop() = 0;
     virtual TString DebugInfo() = 0;
+    virtual TFileHandle* GetFileHandle() = 0;  // Get file handle for sharing with DDisk workers
 };
 
 class TPDisk;
 
 IBlockDevice* CreateRealBlockDevice(const TString &path, ui32 pDiskId, TPDiskMon &mon,
         ui64 reorderingCycles, ui64 seekCostNs, ui64 deviceInFlight, TDeviceMode::TFlags flags,
-        ui32 maxQueuedCompletionActions, TIntrusivePtr<TSectorMap> sectorMap, TPDisk * const pdisk = nullptr);
+        ui32 maxQueuedCompletionActions, TIntrusivePtr<TSectorMap> sectorMap, TPDisk * const pdisk = nullptr,
+        const TString &threadNamePrefix = "Pd");
 IBlockDevice* CreateRealBlockDeviceWithDefaults(const TString &path, TPDiskMon &mon, TDeviceMode::TFlags flags,
-        TIntrusivePtr<TSectorMap> sectorMap, TActorSystem *actorSystem, TPDisk * const pdisk = nullptr);
+        TIntrusivePtr<TSectorMap> sectorMap, TActorSystem *actorSystem, TPDisk * const pdisk = nullptr,
+        const TString &threadNamePrefix = "Pd");
+
+// Factory functions that create RealBlockDevice with existing file handle (for DDisk workers)
+IBlockDevice* CreateRealBlockDeviceWithFile(TFileHandle *fileHandle, const TString &path, ui32 pDiskId, TPDiskMon &mon,
+        ui64 reorderingCycles, ui64 seekCostNs, ui64 deviceInFlight, TDeviceMode::TFlags flags,
+        ui32 maxQueuedCompletionActions, TIntrusivePtr<TSectorMap> sectorMap, TPDisk * const pdisk = nullptr,
+        const TString &threadNamePrefix = "Pd");
+IBlockDevice* CreateRealBlockDeviceWithFileDefaults(TFileHandle *fileHandle, const TString &path, TPDiskMon &mon,
+        TDeviceMode::TFlags flags, TIntrusivePtr<TSectorMap> sectorMap, TActorSystem *actorSystem,
+        TPDisk * const pdisk = nullptr, const TString &threadNamePrefix = "Pd");
 
 } // NPDisk
 } // NKikimr
