@@ -17,6 +17,18 @@ enum class EStorageType {
     Proxy
 };
 
+// Output operator for EStorageType
+inline IOutputStream& operator<<(IOutputStream& out, EStorageType storageType) {
+    switch (storageType) {
+        case EStorageType::Memory:
+            return out << "Memory";
+        case EStorageType::Proxy:
+            return out << "Proxy";
+        default:
+            return out << "Unknown";
+    }
+}
+
 class TPartitionStorage
 {
 public:

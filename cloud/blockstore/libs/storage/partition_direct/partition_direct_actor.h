@@ -24,7 +24,7 @@ using namespace NActors;
 
 using namespace NKikimr;
 
-class TPartitionActor final
+class TPartitionActor
     : public NActors::TActor<TPartitionActor>
     , public TTabletBase<TPartitionActor>
 {
@@ -58,7 +58,7 @@ public:
     };
     using TCounters = TTransactionCounters;
 
-private:
+protected:
     const TStorageConfigPtr Config;
     const NProto::TPartitionConfig PartitionConfig;
     const TDiagnosticsConfigPtr DiagnosticsConfig;
@@ -76,6 +76,7 @@ private:
     // Worker pool
     TVector<NActors::TActorId> WorkerActors;
     ui32 NextWorkerIndex = 0;
+    ui32 WorkerCount = 32;  // Configurable via NBS_PARTITION_DIRECT_WORKER_COUNT env var
     static constexpr ui32 DEFAULT_WORKER_COUNT = 32;
 
 public:
@@ -115,11 +116,11 @@ private:
         const NActors::TActorContext& ctx);
 
     // Обработчики запросов vhost
-    void HandleReadBlocksLocalRequest(
+    virtual void HandleReadBlocksLocalRequest(
         const TEvService::TEvReadBlocksLocalRequest::TPtr& ev,
         const NActors::TActorContext& ctx);
 
-    void HandleWriteBlocksLocalRequest(
+    virtual void HandleWriteBlocksLocalRequest(
         const TEvService::TEvWriteBlocksLocalRequest::TPtr& ev,
         const NActors::TActorContext& ctx);
 

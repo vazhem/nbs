@@ -3,6 +3,7 @@ LIBRARY()
 SRCS(
     partition_direct.cpp
     partition_direct_actor.cpp
+    partition_direct_actor_memory.cpp
     partition_direct_database.cpp
     partition_direct_state.cpp
     partition_direct_storage_mem.cpp

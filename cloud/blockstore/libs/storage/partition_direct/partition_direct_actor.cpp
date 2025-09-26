@@ -55,8 +55,33 @@ TPartitionActor::TPartitionActor(
         siblingCount,
         volumeActorId,
         volumeTabletId))
+    , WorkerCount(DEFAULT_WORKER_COUNT)
 {
     Y_UNUSED(owner);
+
+    // Read worker count from environment variable
+    const char* workerCountEnv = getenv("NBS_PARTITION_DIRECT_WORKER_COUNT");
+    if (workerCountEnv) {
+        try {
+            ui32 envWorkerCount = std::stoul(workerCountEnv);
+            if (envWorkerCount > 0) {
+                WorkerCount = envWorkerCount;
+                LOG_INFO_S(TActivationContext::AsActorContext(), TBlockStoreComponents::PARTITION,
+                    "[" << TabletID() << "] Using worker count from environment: " << WorkerCount);
+            } else {
+                LOG_WARN_S(TActivationContext::AsActorContext(), TBlockStoreComponents::PARTITION,
+                    "[" << TabletID() << "] Invalid worker count in environment: " << workerCountEnv
+                    << " (must be > 0), using default: " << DEFAULT_WORKER_COUNT);
+            }
+        } catch (const std::exception& e) {
+            LOG_WARN_S(TActivationContext::AsActorContext(), TBlockStoreComponents::PARTITION,
+                "[" << TabletID() << "] Failed to parse worker count from environment: " << workerCountEnv
+                << " error: " << e.what() << ", using default: " << DEFAULT_WORKER_COUNT);
+        }
+    } else {
+        LOG_INFO_S(TActivationContext::AsActorContext(), TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] No worker count environment variable set, using default: " << DEFAULT_WORKER_COUNT);
+    }
 
     // Initialize storage based on the storage type flag
     TPartitionStoragePtr partitionStorage;
@@ -1624,14 +1649,10 @@ void TPartitionActor::CreateWorkerPool(const NActors::TActorContext& ctx)
         return;
     }
 
-    // Get worker count from config (use default if not specified)
-    ui32 workerCount = DEFAULT_WORKER_COUNT;
-    // TODO: Add config parameter for worker count
-
     LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
-        "[" << TabletID() << "] Creating worker pool with " << workerCount << " workers");
+        "[" << TabletID() << "] Creating worker pool with " << WorkerCount << " workers");
 
-    WorkerActors.reserve(workerCount);
+    WorkerActors.reserve(WorkerCount);
 
     // Create worker config with thread-safe copies of needed data
     TWorkerStorageConfig config;
@@ -1668,7 +1689,7 @@ void TPartitionActor::CreateWorkerPool(const NActors::TActorContext& ctx)
         config.GroupToDDiskIds[ddiskInfo.GroupIndex].push_back(ddiskInfo.ServiceId);
     }
 
-    for (ui32 i = 0; i < workerCount; ++i) {
+    for (ui32 i = 0; i < WorkerCount; ++i) {
         auto worker = std::unique_ptr<NActors::IActor>(CreatePartitionDirectWorkerActor(i, config));
 
         auto workerId = NCloud::Register(ctx, std::move(worker));
