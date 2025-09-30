@@ -240,7 +240,7 @@ public:
         ui64 startIndex,
         ui32 blocksCount,
         const TBlockDataRef& buffer,
-        const NWilson::TTraceId& traceId = {});
+        NWilson::TTraceId traceId);
 
     NProto::TError WriteBlocks(
         const NActors::TActorContext& ctx,
@@ -248,13 +248,14 @@ public:
         ui64 startIndex,
         ui32 blocksCount,
         const TBlockDataRef& buffer,
-        const NWilson::TTraceId& traceId = {});
+        NWilson::TTraceId traceId);
 
     NProto::TError ZeroBlocks(
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         ui64 startIndex,
-        ui32 blocksCount);
+        ui32 blocksCount,
+        NWilson::TTraceId traceId);
 
     void CopyToSgList(const TBlockDataRef& buffer, const TSgList& sglist);
     void CopyFromSgList(const TSgList& sglist, TBlockDataRef& buffer);

@@ -40,19 +40,19 @@ public:
         const TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TReadBlocksLocalRequest> request,
-        const NWilson::TTraceId& traceId = {}) override;
+        NWilson::TTraceId traceId) override;
 
     NCloud::NProto::TError WriteBlocksLocal(
         const TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TWriteBlocksLocalRequest> request,
-        const NWilson::TTraceId& traceId = {}) override;
+        NWilson::TTraceId traceId) override;
 
     NCloud::NProto::TError ZeroBlocks(
         const TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TZeroBlocksRequest> request,
-        const NWilson::TTraceId& traceId = {}) override;
+        NWilson::TTraceId traceId) override;
 
     // Methods for handling YDB DDisk responses - called by worker actor
     void HandleDDiskReadResponse(
@@ -73,7 +73,7 @@ private:
         ui64 requestId,
         ui64 offset,
         ui32 size,
-        const NWilson::TTraceId& traceId);
+        NWilson::TTraceId traceId);
 
     NCloud::NProto::TError SendWriteToDDisks(
         const NActors::TActorContext& ctx,
@@ -81,7 +81,7 @@ private:
         ui64 offset,
         ui32 size,
         const TString& data,
-        const NWilson::TTraceId& traceId);
+        NWilson::TTraceId traceId);
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -91,7 +91,7 @@ NCloud::NProto::TError TWorkerStorage::ReadBlocksLocal(
     const TActorContext& ctx,
     TRequestInfoPtr requestInfo,
     std::shared_ptr<NProto::TReadBlocksLocalRequest> request,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
     const ui64 startIndex = request->GetStartIndex();
     const ui32 blocksCount = request->GetBlocksCount();
@@ -121,14 +121,14 @@ NCloud::NProto::TError TWorkerStorage::ReadBlocksLocal(
     PendingRequests[requestId] = std::move(requestCtx);
 
     // Send read request to DDisk
-    return SendReadToDDisks(ctx, requestId, offset, size, traceId);
+    return SendReadToDDisks(ctx, requestId, offset, size, std::move(traceId));
 }
 
 NCloud::NProto::TError TWorkerStorage::WriteBlocksLocal(
     const TActorContext& ctx,
     TRequestInfoPtr requestInfo,
     std::shared_ptr<NProto::TWriteBlocksLocalRequest> request,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
     const ui64 startIndex = request->GetStartIndex();
     const ui32 blocksCount = request->BlocksCount;
@@ -163,14 +163,14 @@ NCloud::NProto::TError TWorkerStorage::WriteBlocksLocal(
     PendingRequests[requestId] = std::move(requestCtx);
 
     // Send write request to DDisk
-    return SendWriteToDDisks(ctx, requestId, offset, size, data, traceId);
+    return SendWriteToDDisks(ctx, requestId, offset, size, data, std::move(traceId));
 }
 
 NCloud::NProto::TError TWorkerStorage::ZeroBlocks(
     const TActorContext& ctx,
     TRequestInfoPtr requestInfo,
     std::shared_ptr<NProto::TZeroBlocksRequest> request,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
     Y_UNUSED(ctx, requestInfo, request, traceId);
     // Not implemented for now
@@ -182,12 +182,11 @@ NCloud::NProto::TError TWorkerStorage::SendReadToDDisks(
     ui64 requestId,
     ui64 offset,
     ui32 size,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
-    Y_UNUSED(traceId);
-
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION_WORKER,
         "TWorkerStorage::SendReadToDDisks: requestId=" << requestId
+        << " traceId=" << traceId.GetHexTraceId()
         << " offset=" << offset << " size=" << size
         << " regionCacheSize=" << Config.RegionChunkCache.size());
 
@@ -229,7 +228,9 @@ NCloud::NProto::TError TWorkerStorage::SendReadToDDisks(
     request->Record.SetOffset(chunkRelativeOffset);
     request->Record.SetSize(size);
 
-    ctx.Send(ddiskActorId, request.release(), 0, requestId);
+    // Send with TraceId for request tracing
+    ctx.Send(new IEventHandle(ddiskActorId, ctx.SelfID, request.release(), 0,
+        requestId, nullptr, std::move(traceId)));
 
     return {};  // No error
 }
@@ -240,12 +241,11 @@ NCloud::NProto::TError TWorkerStorage::SendWriteToDDisks(
     ui64 offset,
     ui32 size,
     const TString& data,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
-    Y_UNUSED(traceId);
-
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION_WORKER,
         "TWorkerStorage::SendWriteToDDisks: requestId=" << requestId
+        << " traceId=" << traceId.GetHexTraceId()
         << " offset=" << offset << " size=" << size << " dataSize=" << data.size()
         << " regionCacheSize=" << Config.RegionChunkCache.size());
 
@@ -306,7 +306,9 @@ NCloud::NProto::TError TWorkerStorage::SendWriteToDDisks(
         << " offset=" << chunkRelativeOffset << " size=" << size
         << " dataSize=" << data.size());
 
-    ctx.Send(ddiskActorId, request.release(), 0, requestId);
+    // Send with TraceId for request tracing
+    ctx.Send(new IEventHandle(ddiskActorId, ctx.SelfID, request.release(), 0,
+        requestId, nullptr, std::move(traceId)));
 
     return {};  // No error
 }
@@ -542,14 +544,11 @@ void TPartitionDirectWorkerActor::HandleReadBlocksLocalRequest(
     // Create request info from original event to preserve sender/cookie/context
     auto requestInfo = CreateRequestInfo(ev->Sender, ev->Cookie, ev->Get()->CallContext);
 
-    // Create new trace id for this worker
-    NWilson::TTraceId trace = NWilson::TTraceId::NewTraceId(1, 4095);
-
     LOG_DEBUG(ctx, TBlockStoreComponents::PARTITION_WORKER,
         "[Worker%u] ReadBlocks: requestId=%lu -> traceId=%s",
         WorkerId,
         requestId,
-        trace.GetHexTraceId().c_str());
+        ev->TraceId.GetHexTraceId().c_str());
 
     // Create the request object for storage
     auto request = std::make_shared<NProto::TReadBlocksLocalRequest>();
@@ -558,7 +557,7 @@ void TPartitionDirectWorkerActor::HandleReadBlocksLocalRequest(
     request->BlockSize = record.BlockSize;
     request->Sglist = record.Sglist;
 
-    auto error = Storage->ReadBlocksLocal(ctx, requestInfo, std::move(request), trace);
+    auto error = Storage->ReadBlocksLocal(ctx, requestInfo, std::move(request), std::move(ev->TraceId.Clone()));
 
     // Handle errors from storage operations
     if (NCloud::HasError(error)) {
@@ -605,14 +604,11 @@ void TPartitionDirectWorkerActor::HandleWriteBlocksLocalRequest(
     // Create request info from original event to preserve sender/cookie/context
     auto requestInfo = CreateRequestInfo(ev->Sender, ev->Cookie, ev->Get()->CallContext);
 
-    // Create new trace id for this worker
-    NWilson::TTraceId trace = NWilson::TTraceId::NewTraceId(1, 4095);
-
     LOG_DEBUG(ctx, TBlockStoreComponents::PARTITION_WORKER,
         "[Worker%u] WriteBlocks: requestId=%lu -> traceId=%s",
         WorkerId,
         requestId,
-        trace.GetHexTraceId().c_str());
+        ev->TraceId.GetHexTraceId().c_str());
 
     // Create the request object for storage
     auto request = std::make_shared<NProto::TWriteBlocksLocalRequest>();
@@ -621,7 +617,7 @@ void TPartitionDirectWorkerActor::HandleWriteBlocksLocalRequest(
     request->BlockSize = record.BlockSize;
     request->Sglist = record.Sglist;
 
-    auto error = Storage->WriteBlocksLocal(ctx, requestInfo, std::move(request), trace);
+    auto error = Storage->WriteBlocksLocal(ctx, requestInfo, std::move(request), std::move(ev->TraceId.Clone()));
 
     // Handle errors from storage operations
     if (NCloud::HasError(error)) {

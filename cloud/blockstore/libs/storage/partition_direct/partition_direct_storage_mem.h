@@ -31,19 +31,19 @@ public:
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TReadBlocksLocalRequest> request,
-        const NWilson::TTraceId& traceId = {}) override;
+        NWilson::TTraceId traceId) override;
 
     NCloud::NProto::TError WriteBlocksLocal(
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TWriteBlocksLocalRequest> request,
-        const NWilson::TTraceId& traceId = {}) override;
+        NWilson::TTraceId traceId) override;
 
     NCloud::NProto::TError ZeroBlocks(
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TZeroBlocksRequest> request,
-        const NWilson::TTraceId& traceId = {}) override;
+        NWilson::TTraceId traceId) override;
 };
 
 } // namespace NCloud::NBlockStore::NStorage::NPartitionDirect

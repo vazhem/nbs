@@ -38,19 +38,19 @@ public:
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TReadBlocksLocalRequest> request,
-        const NWilson::TTraceId& traceId = {}) = 0;
+        NWilson::TTraceId traceId) = 0;
 
     virtual NCloud::NProto::TError WriteBlocksLocal(
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TWriteBlocksLocalRequest> request,
-        const NWilson::TTraceId& traceId = {}) = 0;
+        NWilson::TTraceId traceId) = 0;
 
     virtual NCloud::NProto::TError ZeroBlocks(
         const NActors::TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TZeroBlocksRequest> request,
-        const NWilson::TTraceId& traceId = {}) = 0;
+        NWilson::TTraceId traceId ) = 0;
 };
 
 using TPartitionStoragePtr = std::shared_ptr<TPartitionStorage>;

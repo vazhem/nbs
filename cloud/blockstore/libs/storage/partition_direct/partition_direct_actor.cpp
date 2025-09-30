@@ -224,6 +224,11 @@ void TPartitionActor::HandleWriteBlocksLocalRequest(
         return;
     }
 
+    if (!ev->TraceId) {
+        // Generate new trace id if not passed from upper layers
+        ev->TraceId = NWilson::TTraceId::NewTraceId(15, 4095);
+    }
+
     // Forward the entire event to the selected worker
     ctx.Send(ev->Forward(workerId));
 }

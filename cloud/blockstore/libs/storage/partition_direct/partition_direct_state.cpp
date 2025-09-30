@@ -17,7 +17,7 @@ NProto::TError TPartitionState::ReadBlocks(
     ui64 startIndex,
     ui32 blockCount,
     const TBlockDataRef& buffer,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
     if (!ValidateBlockRange(startIndex, blockCount)) {
         return MakeError(E_ARGUMENT, "Invalid block range");
@@ -36,7 +36,7 @@ NProto::TError TPartitionState::ReadBlocks(
     if (!Storage) {
         return MakeError(E_FAIL, "Storage not initialized");
     }
-    return Storage->ReadBlocksLocal(ctx, requestInfo, std::move(request), traceId);
+    return Storage->ReadBlocksLocal(ctx, requestInfo, std::move(request), std::move(traceId));
 }
 
 NProto::TError TPartitionState::WriteBlocks(
@@ -45,7 +45,7 @@ NProto::TError TPartitionState::WriteBlocks(
     ui64 startIndex,
     ui32 blockCount,
     const TBlockDataRef& buffer,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
     if (!ValidateBlockRange(startIndex, blockCount)) {
         return MakeError(E_ARGUMENT, "Invalid block range");
@@ -64,14 +64,15 @@ NProto::TError TPartitionState::WriteBlocks(
     if (!Storage) {
         return MakeError(E_FAIL, "Storage not initialized");
     }
-    return Storage->WriteBlocksLocal(ctx, requestInfo, std::move(request), traceId);
+    return Storage->WriteBlocksLocal(ctx, requestInfo, std::move(request), std::move(traceId));
 }
 
 NProto::TError TPartitionState::ZeroBlocks(
     const NActors::TActorContext& ctx,
     TRequestInfoPtr requestInfo,
     ui64 startIndex,
-    ui32 blockCount)
+    ui32 blockCount,
+    NWilson::TTraceId traceId)
 {
     if (!ValidateBlockRange(startIndex, blockCount)) {
         return MakeError(E_ARGUMENT, "Invalid block range");
@@ -87,7 +88,8 @@ NProto::TError TPartitionState::ZeroBlocks(
     return Storage->ZeroBlocks(
         ctx,
         requestInfo,
-        std::move(request));
+        std::move(request),
+        std::move(traceId));
 }
 
 void TPartitionState::CopyToSgList(const TBlockDataRef& buffer, const TSgList& sglist)

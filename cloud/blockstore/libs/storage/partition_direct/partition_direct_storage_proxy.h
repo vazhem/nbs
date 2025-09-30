@@ -110,19 +110,19 @@ private:
         const TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TReadBlocksLocalRequest> request,
-        const NWilson::TTraceId& traceId = {}) override;
+        NWilson::TTraceId traceId) override;
 
     NCloud::NProto::TError WriteBlocksLocal(
         const TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TWriteBlocksLocalRequest> request,
-        const NWilson::TTraceId& traceId = {}) override;
+        NWilson::TTraceId traceId) override;
 
     NCloud::NProto::TError ZeroBlocks(
         const TActorContext& ctx,
         TRequestInfoPtr requestInfo,
         std::shared_ptr<NProto::TZeroBlocksRequest> request,
-        const NWilson::TTraceId& traceId = {}) override;
+        NWilson::TTraceId traceId) override;
 
     // Methods for handling YDB DDisk responses - called by partition actor
     void HandleDDiskReadResponse(
@@ -165,7 +165,7 @@ private:
         ui64 requestId,
         ui64 offset,
         ui32 size,
-        const NWilson::TTraceId& traceId);
+        NWilson::TTraceId traceId);
 
     NCloud::NProto::TError SendWriteToDDisks(
         const NActors::TActorContext& ctx,
@@ -173,7 +173,7 @@ private:
         ui64 offset,
         ui32 size,
         const TString& data,
-        const NWilson::TTraceId& traceId);
+        NWilson::TTraceId traceId);
 
     void CompleteReadRequest(
         const NActors::TActorContext& ctx,

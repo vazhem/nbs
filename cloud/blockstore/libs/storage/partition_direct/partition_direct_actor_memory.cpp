@@ -89,7 +89,7 @@ void TPartitionMemoryActor::HandleReadBlocksLocalRequest(
         ctx,
         requestInfo,
         request,
-        ev->TraceId);
+        std::move(ev->TraceId.Clone()));
 
     if (HasError(error)) {
         LOG_ERROR(ctx, TBlockStoreComponents::PARTITION,
@@ -145,7 +145,7 @@ void TPartitionMemoryActor::HandleWriteBlocksLocalRequest(
         ctx,
         requestInfo,
         request,
-        ev->TraceId);
+        std::move(ev->TraceId.Clone()));
 
     if (HasError(error)) {
         LOG_ERROR(ctx, TBlockStoreComponents::PARTITION,

@@ -25,7 +25,7 @@ NCloud::NProto::TError TProxyStorage::ReadBlocksLocal(
     const TActorContext& ctx,
     TRequestInfoPtr requestInfo,
     std::shared_ptr<NProto::TReadBlocksLocalRequest> request,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
     // Add detailed logging to trace I/O patterns
     const ui64 readStartIndex = request->GetStartIndex();
@@ -168,7 +168,8 @@ NCloud::NProto::TError TProxyStorage::ReadBlocksLocal(
             // Encode segment index in high bits of requestId for multi-segment reads
             ui64 segmentRequestId = requestId | (static_cast<ui64>(totalSent) << 32);
 
-            auto sendResult = SendReadToDDisks(ctx, segmentRequestId, currentOffset, segmentSize, traceId);
+            auto sendResult = SendReadToDDisks(ctx, segmentRequestId,
+                currentOffset, segmentSize, std::move(traceId));
             if (NCloud::HasError(sendResult)) {
                 PendingRequests.erase(requestId);
 
@@ -192,7 +193,7 @@ NCloud::NProto::TError TProxyStorage::ReadBlocksLocal(
         LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
             "READ SINGLE CHUNK: offset=" << offset << " size=" << size
             << " groupIndex=" << startGroupIndex);
-    auto sendResult = SendReadToDDisks(ctx, requestId, offset, size, traceId);
+    auto sendResult = SendReadToDDisks(ctx, requestId, offset, size, std::move(traceId));
     if (NCloud::HasError(sendResult)) {
         PendingRequests.erase(requestId);
         return sendResult;
@@ -207,7 +208,7 @@ NCloud::NProto::TError TProxyStorage::WriteBlocksLocal(
     const TActorContext& ctx,
     TRequestInfoPtr requestInfo,
     std::shared_ptr<NProto::TWriteBlocksLocalRequest> request,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
     // Add detailed logging to trace I/O patterns (calculate size from sglist later)
     const ui64 writeStartIndex = request->GetStartIndex();
@@ -377,7 +378,8 @@ NCloud::NProto::TError TProxyStorage::WriteBlocksLocal(
             storedRequestCtx.WriteSegments.emplace_back(currentOffset, segmentSize);
 
             // Send segment to appropriate group
-            auto sendResult = SendWriteToDDisks(ctx, segmentRequestId, currentOffset, segmentSize, segmentData, traceId);
+            auto sendResult = SendWriteToDDisks(ctx, segmentRequestId, currentOffset,
+                segmentSize, segmentData, std::move(traceId));
             if (NCloud::HasError(sendResult)) {
                 PendingRequests.erase(requestId);
                 LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
@@ -428,7 +430,7 @@ NCloud::NProto::TError TProxyStorage::WriteBlocksLocal(
     storedRequestCtx.DDiskActorIds = groupDDiskServiceIds;
 
     // Send write request to DDisk actors
-    auto sendResult = SendWriteToDDisks(ctx, requestId, offset, size, data, traceId);
+    auto sendResult = SendWriteToDDisks(ctx, requestId, offset, size, data, std::move(traceId));
     if (NCloud::HasError(sendResult)) {
         // Remove the pending request - error will be handled at higher level
         PendingRequests.erase(requestId);
@@ -443,7 +445,7 @@ NCloud::NProto::TError TProxyStorage::ZeroBlocks(
     const TActorContext& ctx,
     TRequestInfoPtr requestInfo,
     std::shared_ptr<NProto::TZeroBlocksRequest> request,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
     // DDisk selection will be done after calculating the group for the offset
     // For now, just check that we have some DDisk actors available
@@ -495,7 +497,7 @@ NCloud::NProto::TError TProxyStorage::ZeroBlocks(
     PendingRequests[requestId] = std::move(requestCtx);
 
     // Send write request to DDisk actors (zero data)
-    auto sendResult = SendWriteToDDisks(ctx, requestId, offset, size, zeroData, traceId);
+    auto sendResult = SendWriteToDDisks(ctx, requestId, offset, size, zeroData, std::move(traceId));
     if (NCloud::HasError(sendResult)) {
         // Remove the pending request - error will be handled at higher level
         PendingRequests.erase(requestId);
@@ -536,7 +538,7 @@ NCloud::NProto::TError TProxyStorage::SendReadToDDisks(
     ui64 requestId,
     ui64 offset,
     ui32 size,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
     // For multi-segment reads, decode the base requestId for lookup
     ui64 baseRequestId = requestId & 0xFFFFFFFF;  // Lower 32 bits
@@ -678,7 +680,7 @@ NCloud::NProto::TError TProxyStorage::SendWriteToDDisks(
     ui64 offset,
     ui32 size,
     const TString& data,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
     ui64 baseRequestId = requestId & 0xFFFFFFFF;  // Lower 32 bits
     ui32 segmentIndex = static_cast<ui32>(requestId >> 32);  // Upper 32 bits

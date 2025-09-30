@@ -13,7 +13,7 @@ NCloud::NProto::TError TInMemoryStorage::ReadBlocksLocal(
     const NActors::TActorContext& ctx,
     TRequestInfoPtr requestInfo,
     std::shared_ptr<NProto::TReadBlocksLocalRequest> request,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
     Y_UNUSED(traceId);
 
@@ -58,7 +58,7 @@ NCloud::NProto::TError TInMemoryStorage::WriteBlocksLocal(
     const NActors::TActorContext& ctx,
     TRequestInfoPtr requestInfo,
     std::shared_ptr<NProto::TWriteBlocksLocalRequest> request,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
     Y_UNUSED(traceId);
 
@@ -99,7 +99,7 @@ NCloud::NProto::TError TInMemoryStorage::ZeroBlocks(
     const NActors::TActorContext& ctx,
     TRequestInfoPtr requestInfo,
     std::shared_ptr<NProto::TZeroBlocksRequest> request,
-    const NWilson::TTraceId& traceId)
+    NWilson::TTraceId traceId)
 {
     Y_UNUSED(traceId);
 
