@@ -196,7 +196,7 @@ enum ESimpleCounters {
 
     COUNTER_GRAPHSHARD_COUNT = 158 [(CounterOpts) = {Name: "GraphShards"}];
 
-    COUNTER_BLOCKSTORE_PARTITION_DIRECT_SHARD_COUNT = 159        [(CounterOpts) = {Name: "BlockStorePartitionDirectShards"}];
+    COUNTER_BLOCKSTORE_PARTITION_DIRECT_SHARD_COUNT = 213        [(CounterOpts) = {Name: "BlockStorePartitionDirectShards"}];
 }
 
 enum ECumulativeCounters {
