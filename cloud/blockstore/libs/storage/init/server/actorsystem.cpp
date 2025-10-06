@@ -56,6 +56,7 @@
 #include <contrib/ydb/core/protos/config.pb.h>
 #include <contrib/ydb/core/tablet/node_tablet_monitor.h>
 #include <contrib/ydb/core/tablet/tablet_list_renderer.h>
+#include <contrib/ydb/library/actors/wilson/wilson_uploader.h>
 
 namespace NCloud::NBlockStore::NStorage {
 
@@ -347,6 +348,45 @@ public:
                     loadActorService.release(),
                     TMailboxType::HTSwap,
                     appData->UserPoolId));
+        }
+
+        //
+        // WilsonUploader
+        //
+
+        const auto& otelConfig = Args.DiagnosticsConfig->GetOpentelemetryTraceConfig();
+
+        if (otelConfig.HasClientConfig() && otelConfig.HasServiceName()) {
+            const auto& clientConfig = otelConfig.GetClientConfig();
+            const auto& address = clientConfig.GetAddress();
+
+            // Parse address to extract host and port (e.g., "localhost:4316")
+            TString host;
+            ui16 port = 4317;  // Default OTLP port
+
+            size_t colonPos = address.find(':');
+            if (colonPos != TString::npos) {
+                host = address.substr(0, colonPos);
+                TString portStr = address.substr(colonPos + 1);
+                if (!portStr.empty()) {
+                    port = static_cast<ui16>(std::stoul(TString(portStr)));
+                }
+            } else {
+                host = address;
+            }
+
+            // Create WilsonUploader
+            auto wilsonUploader = NWilson::WilsonUploaderParams {
+                .Host = host,
+                .Port = port,
+                .RootCA = "",  // Not used when Insecure is true
+                .ServiceName = otelConfig.GetServiceName(),
+                .GrpcSigner = nullptr,
+            }.CreateUploader();
+
+            setup->LocalServices.emplace_back(
+                NWilson::MakeWilsonUploaderId(),
+                TActorSetupCmd(wilsonUploader, TMailboxType::ReadAsFilled, appData->BatchPoolId));
         }
     }
 };

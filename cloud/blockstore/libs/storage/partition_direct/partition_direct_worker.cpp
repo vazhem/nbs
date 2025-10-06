@@ -1,12 +1,15 @@
 #include <cloud/blockstore/libs/storage/core/proto_helpers.h>
+#include <cloud/blockstore/libs/storage/core/probes.h>
 #include <cloud/storage/core/libs/actors/helpers.h>
 #include <cloud/blockstore/libs/service/request.h>
 #include <cloud/blockstore/libs/storage/api/service.h>
+#include <cloud/storage/core/libs/opentelemetry/impl/helpers.h>
 
 #include <contrib/ydb/library/actors/core/actor.h>
 #include <contrib/ydb/library/actors/core/events.h>
 #include <contrib/ydb/library/actors/core/hfunc.h>
 #include <contrib/ydb/library/actors/wilson/wilson_trace.h>
+#include <contrib/ydb/library/wilson_ids/wilson.h>
 
 #include "partition_direct_storage.h"
 #include "partition_direct_storage_proxy.h"
@@ -105,6 +108,9 @@ NCloud::NProto::TError TWorkerStorage::ReadBlocksLocal(
     // Generate unique request ID
     const ui64 requestId = GenerateRequestId();
 
+    // Create Wilson span for tracing async DDisk operations
+    NWilson::TSpan asyncIOSpan(NKikimr::TWilson::BlobStorage, traceId.Clone(), "PartitionDirect.ReadBlocks");
+
     // Create request context
     TDDiskRequestContext requestCtx(
         TDDiskRequestContext::ERequestType::Read,
@@ -116,12 +122,16 @@ NCloud::NProto::TError TWorkerStorage::ReadBlocksLocal(
 
     requestCtx.OriginalReadRequest = request;
     requestCtx.ReadData.ReserveAndResize(size);
+    requestCtx.Span = std::move(asyncIOSpan);
+
+    // Get traceId from span before moving requestCtx
+    NWilson::TTraceId spanTraceId = requestCtx.Span.GetTraceId();
 
     // Store context
     PendingRequests[requestId] = std::move(requestCtx);
 
-    // Send read request to DDisk
-    return SendReadToDDisks(ctx, requestId, offset, size, std::move(traceId));
+    // Send read request to DDisk with span's traceId
+    return SendReadToDDisks(ctx, requestId, offset, size, std::move(spanTraceId));
 }
 
 NCloud::NProto::TError TWorkerStorage::WriteBlocksLocal(
@@ -142,6 +152,9 @@ NCloud::NProto::TError TWorkerStorage::WriteBlocksLocal(
     // Generate unique request ID
     const ui64 requestId = GenerateRequestId();
 
+    // Create Wilson span for tracing async DDisk operations
+    NWilson::TSpan asyncIOSpan(NKikimr::TWilson::BlobStorage, traceId.Clone(), "PartitionDirect.WriteBlocks");
+
     // Extract data from sglist
     auto guard = request->Sglist.Acquire();
     if (!guard) {
@@ -159,11 +172,16 @@ NCloud::NProto::TError TWorkerStorage::WriteBlocksLocal(
         offset,
         size);
 
+    requestCtx.Span = std::move(asyncIOSpan);
+
+    // Get traceId from span before moving requestCtx
+    NWilson::TTraceId spanTraceId = requestCtx.Span.GetTraceId();
+
     // Store context
     PendingRequests[requestId] = std::move(requestCtx);
 
-    // Send write request to DDisk
-    return SendWriteToDDisks(ctx, requestId, offset, size, data, std::move(traceId));
+    // Send write request to DDisk with span's traceId
+    return SendWriteToDDisks(ctx, requestId, offset, size, data, std::move(spanTraceId));
 }
 
 NCloud::NProto::TError TWorkerStorage::ZeroBlocks(
@@ -344,10 +362,20 @@ void TWorkerStorage::HandleDDiskReadResponse(
                    requestCtx.ReadData.size());
         }
 
+        // End Wilson span successfully
+        if (requestCtx.Span) {
+            requestCtx.Span.EndOk();
+        }
+
         // Send response
         auto response = std::make_unique<TEvService::TEvReadBlocksLocalResponse>();
         ctx.Send(requestCtx.OriginalRequest->Sender, response.release(), 0, requestCtx.OriginalRequest->Cookie);
     } else {
+        // End Wilson span with error
+        if (requestCtx.Span) {
+            requestCtx.Span.EndError(record.GetErrorReason());
+        }
+
         // Handle error
         auto error = MakeError(E_IO, TStringBuilder() << "DDisk read failed: " << record.GetErrorReason());
         auto response = std::make_unique<TEvService::TEvReadBlocksLocalResponse>(error);
@@ -378,10 +406,20 @@ void TWorkerStorage::HandleDDiskWriteResponse(
     auto& requestCtx = it->second;
 
     if (record.GetStatus() == NKikimrProto::OK) {
+        // End Wilson span successfully
+        if (requestCtx.Span) {
+            requestCtx.Span.EndOk();
+        }
+
         // Send success response
         auto response = std::make_unique<TEvService::TEvWriteBlocksLocalResponse>();
         ctx.Send(requestCtx.OriginalRequest->Sender, response.release(), 0, requestCtx.OriginalRequest->Cookie);
     } else {
+        // End Wilson span with error
+        if (requestCtx.Span) {
+            requestCtx.Span.EndError(record.GetErrorReason());
+        }
+
         // Handle error
         auto error = MakeError(E_IO, TStringBuilder() << "DDisk write failed: " << record.GetErrorReason());
         auto response = std::make_unique<TEvService::TEvWriteBlocksLocalResponse>(error);

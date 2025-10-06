@@ -14,6 +14,7 @@
 #include <util/generic/vector.h>
 
 #include <contrib/ydb/library/actors/core/actor.h>
+#include <contrib/ydb/library/actors/wilson/wilson_span.h>
 
 namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 
@@ -46,6 +47,7 @@ struct TDDiskRequestContext {
     ui64 Offset;
     ui32 Size;
     std::shared_ptr<NProto::TReadBlocksLocalRequest> OriginalReadRequest;  // For accessing sglist in reads
+    NWilson::TSpan Span;  // Wilson span for tracing async operations
 
     // Multi-segment read support
     struct TReadSegment {
