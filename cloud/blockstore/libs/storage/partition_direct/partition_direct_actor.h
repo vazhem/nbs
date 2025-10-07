@@ -76,7 +76,7 @@ protected:
     // Worker pool
     TVector<NActors::TActorId> WorkerActors;
     ui32 NextWorkerIndex = 0;
-    ui32 WorkerCount = 32;  // Configurable via NBS_PARTITION_DIRECT_WORKER_COUNT env var
+    ui32 WorkerCount = 32;  // Configurable via PartitionDirectWorkerCount in storage config
     static constexpr ui32 DEFAULT_WORKER_COUNT = 32;
 
 public:
@@ -180,6 +180,7 @@ private:
     // Worker pool management
     void CreateWorkerPool(const NActors::TActorContext& ctx);
     NActors::TActorId SelectNextWorker();
+    void BroadcastConfigUpdateToWorkers(const NActors::TActorContext& ctx);
 
 private:
     BLOCKSTORE_PARTITION_DIRECT_TRANSACTIONS(BLOCKSTORE_IMPLEMENT_TRANSACTION, TTxPartitionDirect)

@@ -17,6 +17,7 @@ namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 
 // Thread-safe configuration data for worker storage
 struct TWorkerStorageConfig {
+    EStorageType StorageType = EStorageType::Proxy;  // Storage type from main actor
     ui32 BlockSize;
     ui64 BlockCount;
     ui32 ChunkSize;
@@ -50,7 +51,33 @@ struct TWorkerStorageConfig {
         return groupStripeIndex * STRIPE_SIZE + offsetWithinStripe;
     }
 
+    TVector<NActors::TActorId> GetDDiskServiceIdsForGroup(ui32 groupIndex) const {
+        auto it = GroupToDDiskIds.find(groupIndex);
+        if (it != GroupToDDiskIds.end()) {
+            return it->second;
+        }
+        return TVector<NActors::TActorId>();
+    }
+
     bool FindChunkForOffset(ui64 offset, ui32& chunkId, TString& ddiskServiceId, ui32& chunkRelativeOffset) const;
+};
+
+////////////////////////////////////////////////////////////////////////////////
+// Event for updating worker storage configuration
+
+struct TEvPartitionDirectWorker {
+    enum EEvents {
+        EvUpdateConfig = EventSpaceBegin(NActors::TEvents::ES_PRIVATE),
+        EvEnd
+    };
+
+    struct TEvUpdateConfig : public NActors::TEventLocal<TEvUpdateConfig, EvUpdateConfig> {
+        TWorkerStorageConfig Config;
+
+        explicit TEvUpdateConfig(const TWorkerStorageConfig& config)
+            : Config(config)
+        {}
+    };
 };
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -29,10 +29,10 @@ NActors::IActorPtr CreatePartitionTablet(
     const NActors::TActorId& volumeActorId,
     ui64 volumeTabletId)
 {
-    // Set storage type based on environment variable
-    EStorageType storageType;
-    TString mode = GetEnv("NBS_PARTITION_DIRECT_MODE");
+    const TString mode = config->GetPartitionDirectMode();
 
+    // Set storage type based on config
+    EStorageType storageType;
     if (mode == "MEMORY") {
         storageType = EStorageType::Memory;
     } else if (mode == "PROXY") {

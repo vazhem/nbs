@@ -161,6 +161,7 @@ NProto::TLinkedDiskFillBandwidth GetBandwidth(
     xxx(LinkedDiskFillBandwidth,                                               \
         TVector<NProto::TLinkedDiskFillBandwidth>,                             \
         {}                                                                    )\
+    xxx(PartitionDirectMode,                  TString,     "PROXY"            )\
 // BLOCKSTORE_STORAGE_CONFIG_RO
 
 #define BLOCKSTORE_STORAGE_CONFIG_RW(xxx)                                      \
@@ -614,6 +615,7 @@ NProto::TLinkedDiskFillBandwidth GetBandwidth(
                                                                                \
     xxx(PartitionBootTimeout,                 TDuration,   Seconds(0)         )\
     xxx(DirectWriteBandwidthQuota,            ui64,        0                  )\
+    xxx(PartitionDirectWorkerCount,           ui32,        32                 )\
 
 // BLOCKSTORE_STORAGE_CONFIG_RW
 

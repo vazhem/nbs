@@ -1278,4 +1278,11 @@ message TStorageServiceConfig
     // Min percentage of reassignable mixed channels after which reassign requests
     // are sent.
     optional uint32 ReassignMixedChannelsPercentageThreshold = 442;
+
+    // Number of worker actors for PartitionDirect tablets.
+    optional uint32 PartitionDirectWorkerCount = 443;
+
+    // Storage mode for PartitionDirect tablets.
+    // Valid values: "PROXY" (default), "MEMORY"
+    optional string PartitionDirectMode = 444;
 }

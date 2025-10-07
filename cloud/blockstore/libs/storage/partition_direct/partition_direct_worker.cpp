@@ -482,7 +482,7 @@ class TPartitionDirectWorkerActor
 {
 private:
     const ui32 WorkerId;
-    const TWorkerStorageConfig Config;
+    TWorkerStorageConfig Config;  // Mutable to allow updates via events
     TPartitionStoragePtr Storage;  // Worker's own storage instance
 
 public:
@@ -493,8 +493,12 @@ public:
         , WorkerId(workerId)
         , Config(config)
     {
-        // Create worker's own storage instance using the config
-        Storage = std::make_shared<TWorkerStorage>(SelfId(), Config);
+        // Create worker's own storage instance based on StorageType
+        if (Config.StorageType == EStorageType::Memory) {
+            Storage = std::make_shared<TInMemoryStorage>(Config.BlockSize);
+        } else {
+            Storage = std::make_shared<TProxyStorage>(SelfId(), Config);
+        }
     }
 
 
@@ -518,6 +522,11 @@ private:
         const NKikimr::TEvBlobStorage::TEvDDiskWriteResponse::TPtr& ev,
         const NActors::TActorContext& ctx);
 
+    // Config update handler
+    void HandleUpdateConfig(
+        const TEvPartitionDirectWorker::TEvUpdateConfig::TPtr& ev,
+        const NActors::TActorContext& ctx);
+
     bool ValidateBlockRange(ui64 blockIndex, ui32 blocksCount) const
     {
         return blockIndex + blocksCount <= Config.BlockCount;
@@ -535,6 +544,9 @@ STFUNC(TPartitionDirectWorkerActor::StateWork)
         // DDisk response handlers
         HFunc(NKikimr::TEvBlobStorage::TEvDDiskReadResponse, HandleDDiskReadResponse);
         HFunc(NKikimr::TEvBlobStorage::TEvDDiskWriteResponse, HandleDDiskWriteResponse);
+
+        // Config update handler
+        HFunc(TEvPartitionDirectWorker::TEvUpdateConfig, HandleUpdateConfig);
 
         default:
             HandleUnexpectedEvent(
@@ -674,14 +686,17 @@ void TPartitionDirectWorkerActor::HandleDDiskReadResponse(
         WorkerId,
         ev->Sender.ToString().c_str());
 
-    // Forward DDisk responses to worker storage for processing
-    auto* workerStorage = dynamic_cast<TWorkerStorage*>(Storage.get());
-    if (workerStorage) {
-        workerStorage->HandleDDiskReadResponse(ctx, ev);
-    } else {
-        LOG_ERROR(ctx, TBlockStoreComponents::PARTITION_WORKER,
-            "[Worker%u] Storage is not TWorkerStorage - cannot handle DDisk response",
-            WorkerId);
+    // Forward DDisk responses to proxy storage for processing
+    // Only TProxyStorage handles DDisk responses (not TInMemoryStorage)
+    if (Config.StorageType == EStorageType::Proxy) {
+        auto* proxyStorage = dynamic_cast<TProxyStorage*>(Storage.get());
+        if (proxyStorage) {
+            proxyStorage->HandleDDiskReadResponse(ctx, ev);
+        } else {
+            LOG_ERROR(ctx, TBlockStoreComponents::PARTITION_WORKER,
+                "[Worker%u] Storage is not TProxyStorage for DDisk read response",
+                WorkerId);
+        }
     }
 }
 
@@ -694,14 +709,42 @@ void TPartitionDirectWorkerActor::HandleDDiskWriteResponse(
         WorkerId,
         ev->Sender.ToString().c_str());
 
-    // Forward DDisk responses to worker storage for processing
-    auto* workerStorage = dynamic_cast<TWorkerStorage*>(Storage.get());
-    if (workerStorage) {
-        workerStorage->HandleDDiskWriteResponse(ctx, ev);
-    } else {
-        LOG_ERROR(ctx, TBlockStoreComponents::PARTITION_WORKER,
-            "[Worker%u] Storage is not TWorkerStorage - cannot handle DDisk response",
-            WorkerId);
+    // Forward DDisk responses to proxy storage for processing
+    // Only TProxyStorage handles DDisk responses (not TInMemoryStorage)
+    if (Config.StorageType == EStorageType::Proxy) {
+        auto* proxyStorage = dynamic_cast<TProxyStorage*>(Storage.get());
+        if (proxyStorage) {
+            proxyStorage->HandleDDiskWriteResponse(ctx, ev);
+        } else {
+            LOG_ERROR(ctx, TBlockStoreComponents::PARTITION_WORKER,
+                "[Worker%u] Storage is not TProxyStorage for DDisk write response",
+                WorkerId);
+        }
+    }
+}
+
+void TPartitionDirectWorkerActor::HandleUpdateConfig(
+    const TEvPartitionDirectWorker::TEvUpdateConfig::TPtr& ev,
+    const NActors::TActorContext& ctx)
+{
+    const auto* msg = ev->Get();
+
+    LOG_INFO(ctx, TBlockStoreComponents::PARTITION_WORKER,
+        "[Worker%u] Received config update: DDiskCount=%lu, ChunkSize=%u, StorageType=%d",
+        WorkerId,
+        msg->Config.DDiskServiceIds.size(),
+        msg->Config.ChunkSize,
+        static_cast<int>(msg->Config.StorageType));
+
+    // Update the config
+    Config = msg->Config;
+
+    // Update the storage's config if it's TProxyStorage
+    if (Config.StorageType == EStorageType::Proxy) {
+        auto* proxyStorage = dynamic_cast<TProxyStorage*>(Storage.get());
+        if (proxyStorage) {
+            proxyStorage->UpdateConfig(msg->Config);
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "partition_direct_storage.h"
+#include "partition_direct_worker.h"
 
 #include <cloud/blockstore/libs/storage/core/public.h>
 #include <cloud/blockstore/libs/storage/core/request_info.h>
@@ -47,7 +48,10 @@ struct TDDiskRequestContext {
     ui64 Offset;
     ui32 Size;
     std::shared_ptr<NProto::TReadBlocksLocalRequest> OriginalReadRequest;  // For accessing sglist in reads
-    NWilson::TSpan Span;  // Wilson span for tracing async operations
+    NWilson::TSpan Span;  // Wilson span for tracing async operations (parent span)
+
+    // Child spans for each DDisk subrequest (key is encoded requestId with segment index)
+    THashMap<ui64, NWilson::TSpan> ChildSpans;
 
     // Multi-segment read support
     struct TReadSegment {
@@ -96,14 +100,27 @@ class TProxyStorage final
 {
 private:
     TActorId OwnerActorId;
-    TPartitionState* PartitionState;
+    TWorkerStorageConfig Config;
+    TPartitionState* PartitionState;  // For main actor only
+    bool UsePartitionState;  // Flag to determine which mode to use
     ui64 NextRequestId = 1;
     THashMap<ui64, TDDiskRequestContext> PendingRequests;
 
     public:
+    // Constructor for workers - uses TWorkerStorageConfig (copy of data)
+    explicit TProxyStorage(TActorId ownerActorId, const TWorkerStorageConfig& config)
+        : OwnerActorId(ownerActorId)
+        , Config(config)
+        , PartitionState(nullptr)
+        , UsePartitionState(false)
+    {
+    }
+
+    // Constructor for main actor - uses TPartitionState pointer
     explicit TProxyStorage(ui32 blockSize, TActorId ownerActorId, TPartitionState* partitionState)
         : OwnerActorId(ownerActorId)
         , PartitionState(partitionState)
+        , UsePartitionState(true)
     {
         Y_UNUSED(blockSize);
     }
@@ -134,6 +151,9 @@ private:
     void HandleDDiskWriteResponse(
         const NActors::TActorContext& ctx,
         const TEvBlobStorage::TEvDDiskWriteResponse::TPtr& ev);
+
+    // Config update for workers (only valid when UsePartitionState == false)
+    void UpdateConfig(const TWorkerStorageConfig& newConfig);
 
     // Multi-segment read support
     void HandleMultiSegmentResponse(
@@ -187,6 +207,15 @@ private:
 
     // Chunk lookup methods (all chunks are pre-allocated)
     bool FindChunkForOffset(ui64 offset, ui32& chunkId);
+
+private:
+    // Helper methods to abstract data access (supports both modes)
+    ui32 GetBlockSize() const;
+    ui32 GetChunkSize() const;
+    const TVector<TActorId>& GetDDiskServiceIds() const;
+    TVector<TActorId> GetDDiskServiceIdsForGroup(ui32 groupIndex) const;
+    ui32 CalculateGroupIndex(ui64 offset) const;
+    bool FindChunkForOffset(ui64 offset, ui32& chunkId, TString& ddiskServiceId, ui32& chunkRelativeOffset) const;
 };
 
 } // namespace NCloud::NBlockStore::NStorage::NPartitionDirect

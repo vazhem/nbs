@@ -699,6 +699,9 @@ public:
     [[nodiscard]] TDuration GetPartitionBootTimeout() const;
 
     [[nodiscard]] ui64 GetDirectWriteBandwidthQuota() const;
+
+    [[nodiscard]] ui32 GetPartitionDirectWorkerCount() const;
+    [[nodiscard]] TString GetPartitionDirectMode() const;
 };
 
 ui64 GetAllocationUnit(

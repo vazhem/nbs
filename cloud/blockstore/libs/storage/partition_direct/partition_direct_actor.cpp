@@ -1,4 +1,5 @@
 #include <cloud/blockstore/libs/storage/core/proto_helpers.h>
+#include <cloud/blockstore/libs/storage/core/config.h>
 #include <cloud/storage/core/libs/actors/helpers.h>
 
 #include <contrib/ydb/core/tablet_flat/tablet_flat_executed.h>
@@ -40,10 +41,10 @@ TPartitionActor::TPartitionActor(
     const TActorId& volumeActorId,
     ui64 volumeTabletId)
     : TActor<TPartitionActor>(&TThis::StateWork)
-    , TTabletBase(owner, std::move(storage), nullptr)
-    , Config(std::move(config))
-    , PartitionConfig(std::move(partitionConfig))
-    , DiagnosticsConfig(std::move(diagnosticsConfig))
+    , TTabletBase(owner, storage, nullptr)
+    , Config(config)
+    , PartitionConfig(partitionConfig)
+    , DiagnosticsConfig(diagnosticsConfig)
     , State(std::make_unique<TPartitionState>(
         std::move(storage),
         Config,
@@ -59,28 +60,16 @@ TPartitionActor::TPartitionActor(
 {
     Y_UNUSED(owner);
 
-    // Read worker count from environment variable
-    const char* workerCountEnv = getenv("NBS_PARTITION_DIRECT_WORKER_COUNT");
-    if (workerCountEnv) {
-        try {
-            ui32 envWorkerCount = std::stoul(workerCountEnv);
-            if (envWorkerCount > 0) {
-                WorkerCount = envWorkerCount;
-                LOG_INFO_S(TActivationContext::AsActorContext(), TBlockStoreComponents::PARTITION,
-                    "[" << TabletID() << "] Using worker count from environment: " << WorkerCount);
-            } else {
-                LOG_WARN_S(TActivationContext::AsActorContext(), TBlockStoreComponents::PARTITION,
-                    "[" << TabletID() << "] Invalid worker count in environment: " << workerCountEnv
-                    << " (must be > 0), using default: " << DEFAULT_WORKER_COUNT);
-            }
-        } catch (const std::exception& e) {
-            LOG_WARN_S(TActivationContext::AsActorContext(), TBlockStoreComponents::PARTITION,
-                "[" << TabletID() << "] Failed to parse worker count from environment: " << workerCountEnv
-                << " error: " << e.what() << ", using default: " << DEFAULT_WORKER_COUNT);
-        }
-    } else {
+    // Read worker count from config
+    const ui32 configWorkerCount = Config->GetPartitionDirectWorkerCount();
+    if (configWorkerCount > 0) {
+        WorkerCount = configWorkerCount;
         LOG_INFO_S(TActivationContext::AsActorContext(), TBlockStoreComponents::PARTITION,
-            "[" << TabletID() << "] No worker count environment variable set, using default: " << DEFAULT_WORKER_COUNT);
+            "[" << TabletID() << "] Using worker count from config: " << WorkerCount);
+    } else {
+        LOG_WARN_S(TActivationContext::AsActorContext(), TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Invalid worker count in config: " << configWorkerCount
+            << " (must be > 0), using default: " << DEFAULT_WORKER_COUNT);
     }
 
     // Initialize storage based on the storage type flag
@@ -1666,37 +1655,30 @@ void TPartitionActor::CreateWorkerPool(const NActors::TActorContext& ctx)
 
     // Create worker config with thread-safe copies of needed data
     TWorkerStorageConfig config;
+    config.StorageType = StorageType;  // Pass storage type to workers
     config.BlockSize = State->GetBlockSize();
     config.BlockCount = State->GetBlockCount();
     config.ChunkSize = State->GetChunkSize();
     config.DDiskServiceIds = State->GetDDiskServiceIds();  // Copy DDisk service IDs
 
-    // Copy region chunk cache for thread safety
-    THashMap<ui64, TRegionChunkMapping> regionCache;
-    ui64 totalRegions = State->GetTotalRegionsNeeded();
-    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
-        "[" << TabletID() << "] Copying " << totalRegions << " regions to worker config");
-
-    for (ui64 i = 0; i < totalRegions; ++i) {
-        TRegionChunkMapping mapping;
-        if (State->GetRegionMapping(i, mapping)) {
-            regionCache[i] = mapping;
-            LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
-                "[" << TabletID() << "] Region " << i << " has " << mapping.ChunkIds.size() << " chunks");
-        } else {
-            LOG_WARN_S(ctx, TBlockStoreComponents::PARTITION,
-                "[" << TabletID() << "] Failed to get region mapping for region " << i);
+    // Copy region chunk cache for thread safety (only needed for Proxy storage)
+    if (StorageType == EStorageType::Proxy) {
+        THashMap<ui64, TRegionChunkMapping> regionCache;
+        ui64 totalRegions = State->GetTotalRegionsNeeded();
+        for (ui64 i = 0; i < totalRegions; ++i) {
+            TRegionChunkMapping mapping;
+            if (State->GetRegionMapping(i, mapping)) {
+                regionCache[i] = mapping;
+            } else {
+                LOG_WARN_S(ctx, TBlockStoreComponents::PARTITION,
+                    "[" << TabletID() << "] Failed to get region mapping for region " << i);
+            }
         }
-    }
-    config.RegionChunkCache = std::move(regionCache);
-
-    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
-        "[" << TabletID() << "] Worker config populated with " << config.RegionChunkCache.size()
-        << " regions, ChunkSize=" << config.ChunkSize);
-
-    // Create group-to-DDisk mapping
-    for (const auto& ddiskInfo : State->GetDDiskInfos()) {
-        config.GroupToDDiskIds[ddiskInfo.GroupIndex].push_back(ddiskInfo.ServiceId);
+        config.RegionChunkCache = std::move(regionCache);
+        // Create group-to-DDisk mapping
+        for (const auto& ddiskInfo : State->GetDDiskInfos()) {
+            config.GroupToDDiskIds[ddiskInfo.GroupIndex].push_back(ddiskInfo.ServiceId);
+        }
     }
 
     for (ui32 i = 0; i < WorkerCount; ++i) {
@@ -1722,6 +1704,58 @@ NActors::TActorId TPartitionActor::SelectNextWorker()
     auto workerId = WorkerActors[NextWorkerIndex];
     NextWorkerIndex = (NextWorkerIndex + 1) % WorkerActors.size();
     return workerId;
+}
+
+void TPartitionActor::BroadcastConfigUpdateToWorkers(const NActors::TActorContext& ctx)
+{
+    if (WorkerActors.empty()) {
+        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] No workers to update");
+        return;
+    }
+
+    // Don't broadcast updates for Memory storage - it doesn't need them
+    if (StorageType == EStorageType::Memory) {
+        LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+            "[" << TabletID() << "] Skipping config broadcast for Memory storage");
+        return;
+    }
+
+    // Create worker config with thread-safe copies of current state
+    TWorkerStorageConfig config;
+    config.StorageType = StorageType;
+    config.BlockSize = State->GetBlockSize();
+    config.BlockCount = State->GetBlockCount();
+    config.ChunkSize = State->GetChunkSize();
+    config.DDiskServiceIds = State->GetDDiskServiceIds();
+
+    // Copy region chunk cache for thread safety
+    THashMap<ui64, TRegionChunkMapping> regionCache;
+    ui64 totalRegions = State->GetTotalRegionsNeeded();
+    for (ui64 i = 0; i < totalRegions; ++i) {
+        TRegionChunkMapping mapping;
+        if (State->GetRegionMapping(i, mapping)) {
+            regionCache[i] = mapping;
+        }
+    }
+    config.RegionChunkCache = std::move(regionCache);
+
+    // Create group-to-DDisk mapping
+    for (const auto& ddiskInfo : State->GetDDiskInfos()) {
+        config.GroupToDDiskIds[ddiskInfo.GroupIndex].push_back(ddiskInfo.ServiceId);
+    }
+
+    LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Broadcasting config update to " << WorkerActors.size()
+        << " workers: DDiskCount=" << config.DDiskServiceIds.size()
+        << ", ChunkSize=" << config.ChunkSize
+        << ", Regions=" << config.RegionChunkCache.size());
+
+    // Send update to all workers
+    for (const auto& workerId : WorkerActors) {
+        auto updateEvent = std::make_unique<TEvPartitionDirectWorker::TEvUpdateConfig>(config);
+        ctx.Send(workerId, updateEvent.release());
+    }
 }
 
 }   // namespace NCloud::NBlockStore::NStorage::NPartitionDirect
