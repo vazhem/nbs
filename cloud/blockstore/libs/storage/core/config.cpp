@@ -161,7 +161,10 @@ NProto::TLinkedDiskFillBandwidth GetBandwidth(
     xxx(LinkedDiskFillBandwidth,                                               \
         TVector<NProto::TLinkedDiskFillBandwidth>,                             \
         {}                                                                    )\
-    xxx(PartitionDirectMode,                  TString,     "PROXY"            )\
+    xxx(PartitionDirectMode,                  NProto::EPartitionDirectMode,     \
+        NProto::PARTITION_DIRECT_MODE_PROXY                                   )\
+    xxx(PartitionDirectWorkerMode,            NProto::EPartitionDirectWorkerMode, \
+        NProto::PARTITION_DIRECT_WORKER_MODE_DDISK                            )\
 // BLOCKSTORE_STORAGE_CONFIG_RO
 
 #define BLOCKSTORE_STORAGE_CONFIG_RW(xxx)                                      \
@@ -736,6 +739,16 @@ IOutputStream& operator <<(
 IOutputStream& operator<<(IOutputStream& out, NProto::EResyncPolicy pt)
 {
     return out << NProto::EResyncPolicy_Name(pt);
+}
+
+IOutputStream& operator<<(IOutputStream& out, NProto::EPartitionDirectMode mode)
+{
+    return out << NProto::EPartitionDirectMode_Name(mode);
+}
+
+IOutputStream& operator<<(IOutputStream& out, NProto::EPartitionDirectWorkerMode mode)
+{
+    return out << NProto::EPartitionDirectWorkerMode_Name(mode);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

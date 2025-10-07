@@ -39,7 +39,7 @@ TPartitionMemoryActor::TPartitionMemoryActor(
     InMemoryStorage = std::make_shared<TInMemoryStorage>(PartitionConfig.GetBlockSize());
 
     // Set the storage type to memory
-    StorageType = EStorageType::Memory;
+    StorageType = NProto::PARTITION_DIRECT_MODE_MEMORY;
 
     // Set in-memory storage in state
     State->SetStorage(InMemoryStorage);

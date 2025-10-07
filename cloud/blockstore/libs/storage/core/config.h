@@ -701,7 +701,8 @@ public:
     [[nodiscard]] ui64 GetDirectWriteBandwidthQuota() const;
 
     [[nodiscard]] ui32 GetPartitionDirectWorkerCount() const;
-    [[nodiscard]] TString GetPartitionDirectMode() const;
+    [[nodiscard]] NProto::EPartitionDirectMode GetPartitionDirectMode() const;
+    [[nodiscard]] NProto::EPartitionDirectWorkerMode GetPartitionDirectWorkerMode() const;
 };
 
 ui64 GetAllocationUnit(

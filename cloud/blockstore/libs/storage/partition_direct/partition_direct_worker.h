@@ -17,7 +17,7 @@ namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 
 // Thread-safe configuration data for worker storage
 struct TWorkerStorageConfig {
-    EStorageType StorageType = EStorageType::Proxy;  // Storage type from main actor
+    NProto::EPartitionDirectMode StorageType = NProto::PARTITION_DIRECT_MODE_PROXY;  // Storage type from main actor
     ui32 BlockSize;
     ui64 BlockCount;
     ui32 ChunkSize;

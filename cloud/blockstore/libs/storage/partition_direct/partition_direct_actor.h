@@ -65,7 +65,10 @@ protected:
     std::unique_ptr<TPartitionState> State;
 
     // Storage type flag
-    EStorageType StorageType = EStorageType::Proxy;
+    NProto::EPartitionDirectMode StorageType = NProto::PARTITION_DIRECT_MODE_PROXY;
+
+    // Worker mode flag
+    NProto::EPartitionDirectWorkerMode WorkerMode = NProto::PARTITION_DIRECT_WORKER_MODE_DDISK;
 
     // State machine
     EPartitionState CurrentState = EPartitionState::Boot;

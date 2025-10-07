@@ -494,7 +494,7 @@ public:
         , Config(config)
     {
         // Create worker's own storage instance based on StorageType
-        if (Config.StorageType == EStorageType::Memory) {
+        if (Config.StorageType == NProto::PARTITION_DIRECT_MODE_MEMORY) {
             Storage = std::make_shared<TInMemoryStorage>(Config.BlockSize);
         } else {
             Storage = std::make_shared<TProxyStorage>(SelfId(), Config);
@@ -688,7 +688,7 @@ void TPartitionDirectWorkerActor::HandleDDiskReadResponse(
 
     // Forward DDisk responses to proxy storage for processing
     // Only TProxyStorage handles DDisk responses (not TInMemoryStorage)
-    if (Config.StorageType == EStorageType::Proxy) {
+    if (Config.StorageType == NProto::PARTITION_DIRECT_MODE_PROXY) {
         auto* proxyStorage = dynamic_cast<TProxyStorage*>(Storage.get());
         if (proxyStorage) {
             proxyStorage->HandleDDiskReadResponse(ctx, ev);
@@ -711,7 +711,7 @@ void TPartitionDirectWorkerActor::HandleDDiskWriteResponse(
 
     // Forward DDisk responses to proxy storage for processing
     // Only TProxyStorage handles DDisk responses (not TInMemoryStorage)
-    if (Config.StorageType == EStorageType::Proxy) {
+    if (Config.StorageType == NProto::PARTITION_DIRECT_MODE_PROXY) {
         auto* proxyStorage = dynamic_cast<TProxyStorage*>(Storage.get());
         if (proxyStorage) {
             proxyStorage->HandleDDiskWriteResponse(ctx, ev);
@@ -740,7 +740,7 @@ void TPartitionDirectWorkerActor::HandleUpdateConfig(
     Config = msg->Config;
 
     // Update the storage's config if it's TProxyStorage
-    if (Config.StorageType == EStorageType::Proxy) {
+    if (Config.StorageType == NProto::PARTITION_DIRECT_MODE_PROXY) {
         auto* proxyStorage = dynamic_cast<TProxyStorage*>(Storage.get());
         if (proxyStorage) {
             proxyStorage->UpdateConfig(msg->Config);

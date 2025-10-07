@@ -83,6 +83,20 @@ enum EResyncPolicy
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+
+enum EPartitionDirectMode
+{
+    PARTITION_DIRECT_MODE_PROXY = 0;
+    PARTITION_DIRECT_MODE_MEMORY = 1;
+}
+
+enum EPartitionDirectWorkerMode
+{
+    PARTITION_DIRECT_WORKER_MODE_DDISK = 0;
+    PARTITION_DIRECT_WORKER_MODE_PING = 1;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 //
 //  !!!IMPORTANT!!!
 //  Even though StorageServiceConfig is usually stored in textual format, it may
@@ -1283,6 +1297,8 @@ message TStorageServiceConfig
     optional uint32 PartitionDirectWorkerCount = 443;
 
     // Storage mode for PartitionDirect tablets.
-    // Valid values: "PROXY" (default), "MEMORY"
-    optional string PartitionDirectMode = 444;
+    optional EPartitionDirectMode PartitionDirectMode = 444;
+
+    // Worker mode for PartitionDirect tablets.
+    optional EPartitionDirectWorkerMode PartitionDirectWorkerMode = 445;
 }

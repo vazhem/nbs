@@ -131,7 +131,7 @@ private:
     NKikimr::TTabletStorageInfoPtr StorageInfo;
     TPartitionStoragePtr Storage;
 
-    EStorageType storageType = EStorageType::Memory;
+    NProto::EPartitionDirectMode storageType = NProto::PARTITION_DIRECT_MODE_MEMORY;
     ui32 VirtualGroupId = 0;  // ID of the virtual group with mirror-3-direct erasure
     ui64 StoragePoolId = 0;   // ID of the storage pool containing our group
     TVector<TDDiskInfo> DDiskInfos;  // Information about DDisk actors in the group
@@ -184,12 +184,12 @@ public:
     }
 
     // Basic getters
-    EStorageType GetStorageType() const
+    NProto::EPartitionDirectMode GetStorageType() const
     {
         return storageType;
     }
 
-    void SetStorageType(EStorageType newStorageType)
+    void SetStorageType(NProto::EPartitionDirectMode newStorageType)
     {
         storageType = newStorageType;
     }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cloud/blockstore/config/storage.pb.h>
 #include <cloud/blockstore/libs/storage/core/public.h>
 #include <cloud/blockstore/libs/storage/core/request_info.h>
 #include <cloud/blockstore/libs/service/request.h>
@@ -8,26 +9,19 @@
 #include <contrib/ydb/library/actors/core/actor.h>
 #include <contrib/ydb/library/actors/wilson/wilson_trace.h>
 
+namespace NCloud::NBlockStore::NProto {
+
+// Output operators for proto enums (defined in partition_direct.cpp)
+IOutputStream& operator<<(IOutputStream& out, EPartitionDirectMode mode);
+IOutputStream& operator<<(IOutputStream& out, EPartitionDirectWorkerMode mode);
+
+} // namespace NCloud::NBlockStore::NProto
+
 namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-enum class EStorageType {
-    Memory,
-    Proxy
-};
-
-// Output operator for EStorageType
-inline IOutputStream& operator<<(IOutputStream& out, EStorageType storageType) {
-    switch (storageType) {
-        case EStorageType::Memory:
-            return out << "Memory";
-        case EStorageType::Proxy:
-            return out << "Proxy";
-        default:
-            return out << "Unknown";
-    }
-}
+// Use proto enums directly (similar to EResyncPolicy pattern)
 
 class TPartitionStorage
 {

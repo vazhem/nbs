@@ -10,6 +10,7 @@
 #include "partition_direct_actor.h"
 #include "partition_direct_state.h"
 #include "partition_direct_worker.h"
+#include "partition_direct_worker_ping.h"
 
 namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 
@@ -72,9 +73,14 @@ TPartitionActor::TPartitionActor(
             << " (must be > 0), using default: " << DEFAULT_WORKER_COUNT);
     }
 
+    // Read worker mode from config
+    WorkerMode = Config->GetPartitionDirectWorkerMode();
+    LOG_INFO_S(TActivationContext::AsActorContext(), TBlockStoreComponents::PARTITION,
+        "[" << TabletID() << "] Using worker mode from config: " << WorkerMode);
+
     // Initialize storage based on the storage type flag
     TPartitionStoragePtr partitionStorage;
-    if (StorageType == EStorageType::Memory) {
+    if (StorageType == NProto::PARTITION_DIRECT_MODE_MEMORY) {
         partitionStorage = std::make_shared<TInMemoryStorage>(PartitionConfig.GetBlockSize());
     } else {
         partitionStorage = std::make_shared<TProxyStorage>(
@@ -1662,7 +1668,7 @@ void TPartitionActor::CreateWorkerPool(const NActors::TActorContext& ctx)
     config.DDiskServiceIds = State->GetDDiskServiceIds();  // Copy DDisk service IDs
 
     // Copy region chunk cache for thread safety (only needed for Proxy storage)
-    if (StorageType == EStorageType::Proxy) {
+    if (StorageType == NProto::PARTITION_DIRECT_MODE_PROXY) {
         THashMap<ui64, TRegionChunkMapping> regionCache;
         ui64 totalRegions = State->GetTotalRegionsNeeded();
         for (ui64 i = 0; i < totalRegions; ++i) {
@@ -1682,9 +1688,24 @@ void TPartitionActor::CreateWorkerPool(const NActors::TActorContext& ctx)
     }
 
     for (ui32 i = 0; i < WorkerCount; ++i) {
-        auto worker = std::unique_ptr<NActors::IActor>(CreatePartitionDirectWorkerActor(i, config));
+        std::unique_ptr<NActors::IActor> worker;
 
-        auto workerId = NCloud::Register(ctx, std::move(worker));
+        // Create appropriate worker based on mode
+        if (WorkerMode == NProto::PARTITION_DIRECT_WORKER_MODE_PING) {
+            worker = std::unique_ptr<NActors::IActor>(CreatePartitionDirectWorkerPingActor(i, config));
+            LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+                "[" << TabletID() << "] Creating PING worker " << i);
+        } else {
+            worker = std::unique_ptr<NActors::IActor>(CreatePartitionDirectWorkerActor(i, config));
+            LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+                "[" << TabletID() << "] Creating DDISK worker " << i);
+        }
+
+        // Register with ReadAsFilled mailbox type and system pool
+        auto workerId = ctx.ExecutorThread.RegisterActor(
+            worker.release(),
+            TMailboxType::ReadAsFilled,
+            AppData()->SystemPoolId);
         WorkerActors.push_back(workerId);
 
         LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
@@ -1692,7 +1713,8 @@ void TPartitionActor::CreateWorkerPool(const NActors::TActorContext& ctx)
     }
 
     LOG_INFO_S(ctx, TBlockStoreComponents::PARTITION,
-        "[" << TabletID() << "] Successfully created " << WorkerActors.size() << " worker actors");
+        "[" << TabletID() << "] Successfully created " << WorkerActors.size()
+        << " " << WorkerMode << " worker actors");
 }
 
 NActors::TActorId TPartitionActor::SelectNextWorker()
@@ -1715,7 +1737,7 @@ void TPartitionActor::BroadcastConfigUpdateToWorkers(const NActors::TActorContex
     }
 
     // Don't broadcast updates for Memory storage - it doesn't need them
-    if (StorageType == EStorageType::Memory) {
+    if (StorageType == NProto::PARTITION_DIRECT_MODE_MEMORY) {
         LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
             "[" << TabletID() << "] Skipping config broadcast for Memory storage");
         return;

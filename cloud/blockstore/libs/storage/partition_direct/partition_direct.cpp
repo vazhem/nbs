@@ -7,6 +7,19 @@
 #include "partition_direct_actor.h"
 #include "partition_direct_actor_memory.h"
 
+namespace NCloud::NBlockStore::NProto {
+
+// Output operators for proto enums (needed for logging)
+IOutputStream& operator<<(IOutputStream& out, EPartitionDirectMode mode) {
+    return out << EPartitionDirectMode_Name(mode);
+}
+
+IOutputStream& operator<<(IOutputStream& out, EPartitionDirectWorkerMode mode) {
+    return out << EPartitionDirectWorkerMode_Name(mode);
+}
+
+} // namespace NCloud::NBlockStore::NProto
+
 namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 
 using namespace NActors;
@@ -29,25 +42,14 @@ NActors::IActorPtr CreatePartitionTablet(
     const NActors::TActorId& volumeActorId,
     ui64 volumeTabletId)
 {
-    const TString mode = config->GetPartitionDirectMode();
-
-    // Set storage type based on config
-    EStorageType storageType;
-    if (mode == "MEMORY") {
-        storageType = EStorageType::Memory;
-    } else if (mode == "PROXY") {
-        storageType = EStorageType::Proxy;
-    } else {
-        // Default to Proxy if not specified or invalid
-        storageType = EStorageType::Proxy;
-    }
+    const auto mode = config->GetPartitionDirectMode();
 
     // Log the selected mode
     LOG_INFO_S(TActivationContext::AsActorContext(), TBlockStoreComponents::PARTITION,
-        "Using PartitionDirect mode: " << storageType);
+        "Using PartitionDirect mode: " << mode);
 
     // Create appropriate actor based on storage type
-    if (storageType == EStorageType::Memory) {
+    if (mode == NProto::PARTITION_DIRECT_MODE_MEMORY) {
         return std::make_unique<TPartitionMemoryActor>(
             owner,
             std::move(storage),
