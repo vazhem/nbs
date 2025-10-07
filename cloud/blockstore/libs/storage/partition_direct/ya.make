@@ -10,6 +10,7 @@ SRCS(
     partition_direct_storage_proxy.cpp
     partition_direct_worker.cpp
     partition_direct_worker_ping.cpp
+    partition_direct_worker_mem.cpp
 )
 
 PEERDIR(

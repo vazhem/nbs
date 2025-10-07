@@ -94,6 +94,7 @@ enum EPartitionDirectWorkerMode
 {
     PARTITION_DIRECT_WORKER_MODE_DDISK = 0;
     PARTITION_DIRECT_WORKER_MODE_PING = 1;
+    PARTITION_DIRECT_WORKER_MODE_MEMORY = 2;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

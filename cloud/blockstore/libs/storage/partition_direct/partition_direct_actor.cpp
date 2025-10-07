@@ -11,6 +11,7 @@
 #include "partition_direct_state.h"
 #include "partition_direct_worker.h"
 #include "partition_direct_worker_ping.h"
+#include "partition_direct_worker_mem.h"
 
 namespace NCloud::NBlockStore::NStorage::NPartitionDirect {
 
@@ -1695,6 +1696,10 @@ void TPartitionActor::CreateWorkerPool(const NActors::TActorContext& ctx)
             worker = std::unique_ptr<NActors::IActor>(CreatePartitionDirectWorkerPingActor(i, config));
             LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
                 "[" << TabletID() << "] Creating PING worker " << i);
+        } else if (WorkerMode == NProto::PARTITION_DIRECT_WORKER_MODE_MEMORY) {
+            worker = std::unique_ptr<NActors::IActor>(CreatePartitionDirectWorkerMemActor(i, config));
+            LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
+                "[" << TabletID() << "] Creating MEMORY worker " << i);
         } else {
             worker = std::unique_ptr<NActors::IActor>(CreatePartitionDirectWorkerActor(i, config));
             LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION,
