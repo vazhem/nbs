@@ -6,6 +6,7 @@
 #include <contrib/ydb/core/blobstorage/base/blobstorage_events.h>
 #include <contrib/ydb/core/protos/blobstorage_config.pb.h>
 #include <contrib/ydb/core/base/tablet_pipecache.h>
+#include <contrib/ydb/library/actors/core/monotonic.h>
 
 #include "partition_direct_actor.h"
 #include "partition_direct_state.h"
@@ -19,6 +20,17 @@ using namespace NActors;
 using namespace NCloud::NBlockStore;
 using namespace NKikimr;
 using namespace NKikimr::NTabletFlatExecutor;
+
+////////////////////////////////////////////////////////////////////////////////
+// Trace ID throttling counters
+
+// Throttle trace ID creation to avoid overwhelming the tracing system
+// One trace per 100ms per request type should be sufficient for observability
+namespace {
+    std::atomic<NActors::TMonotonic> LastReadTraceTs{NActors::TMonotonic::Zero()};
+    std::atomic<NActors::TMonotonic> LastWriteTraceTs{NActors::TMonotonic::Zero()};
+    constexpr TDuration TraceSamplePeriod = TDuration::MilliSeconds(100);
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Constants for request cookies
@@ -187,8 +199,15 @@ void TPartitionActor::HandleReadBlocksLocalRequest(
     }
 
     if (!ev->TraceId) {
-        // Generate new trace id if not passed from upper layers
-        ev->TraceId = NWilson::TTraceId::NewTraceId(15, 4095);
+        // Generate new trace id with throttling to avoid overwhelming the tracing system
+        // Uses per-request-type atomic counter to ensure only one trace per sample period
+        ev->TraceId = NWilson::TTraceId::NewTraceIdThrottled(
+            15,                     // verbosity
+            4095,                   // timeToLive
+            LastReadTraceTs,        // atomic counter for read requests
+            ctx.Monotonic(),        // current monotonic time
+            TraceSamplePeriod       // 100ms between samples
+        );
     }
 
     // Forward the entire event to the selected worker
@@ -226,8 +245,15 @@ void TPartitionActor::HandleWriteBlocksLocalRequest(
     }
 
     if (!ev->TraceId) {
-        // Generate new trace id if not passed from upper layers
-        ev->TraceId = NWilson::TTraceId::NewTraceId(15, 4095);
+        // Generate new trace id with throttling to avoid overwhelming the tracing system
+        // Uses per-request-type atomic counter to ensure only one trace per sample period
+        ev->TraceId = NWilson::TTraceId::NewTraceIdThrottled(
+            15,                     // verbosity
+            4095,                   // timeToLive
+            LastWriteTraceTs,       // atomic counter for write requests
+            ctx.Monotonic(),        // current monotonic time
+            TraceSamplePeriod       // 100ms between samples
+        );
     }
 
     // Forward the entire event to the selected worker
