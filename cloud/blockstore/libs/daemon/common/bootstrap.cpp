@@ -399,7 +399,8 @@ void TBootstrapBase::Init()
             ServerStats,
             Configs->ServerConfig->GetChecksumFlags(),
             Configs->ServerConfig->GetMaxZeroBlocksSubRequestSize(),
-            NbdErrorHandlerMap);
+            NbdErrorHandlerMap,
+            Configs->ServerConfig->GetNbdInMemoryEnabled());
 
         endpointListeners.emplace(
             NProto::IPC_NBD,

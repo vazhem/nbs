@@ -7,6 +7,7 @@
 #include <cloud/blockstore/libs/nbd/server.h>
 #include <cloud/blockstore/libs/nbd/server_handler.h>
 #include <cloud/blockstore/libs/service/device_handler.h>
+#include <cloud/blockstore/libs/service/device_handler_inmemory.h>
 #include <cloud/storage/core/libs/common/media.h>
 #include <cloud/storage/core/libs/diagnostics/logging.h>
 
@@ -30,6 +31,8 @@ private:
     const NProto::TChecksumFlags ChecksumFlags;
     const ui32 MaxZeroBlocksSubRequestSize;
     const IErrorHandlerMapPtr ErrorHandlerMap;
+    const bool InMemoryEnabled;
+    TLog Log;
 
 public:
     TNbdEndpointListener(
@@ -38,14 +41,20 @@ public:
             IServerStatsPtr serverStats,
             NProto::TChecksumFlags checksumFlags,
             ui32 maxZeroBlocksSubRequestSize,
-            IErrorHandlerMapPtr errorHandlerMap)
+            IErrorHandlerMapPtr errorHandlerMap,
+            bool inMemoryEnabled)
         : Server(std::move(server))
-        , Logging(std::move(logging))
+        , Logging(logging)
         , ServerStats(std::move(serverStats))
         , ChecksumFlags(std::move(checksumFlags))
         , MaxZeroBlocksSubRequestSize(maxZeroBlocksSubRequestSize)
-        , ErrorHandlerMap(errorHandlerMap)
-    {}
+        , ErrorHandlerMap(std::move(errorHandlerMap))
+        , InMemoryEnabled(inMemoryEnabled)
+    {
+        if (logging) {
+            Log = logging->CreateLog("BLOCKSTORE_SERVER");
+        }
+    }
 
     TFuture<NProto::TError> StartEndpoint(
         const NProto::TStartEndpointRequest& request,
@@ -65,8 +74,17 @@ public:
         options.StorageMediaKind = volume.GetStorageMediaKind();
         options.MaxZeroBlocksSubRequestSize = MaxZeroBlocksSubRequestSize;
 
+        IDeviceHandlerFactoryPtr deviceHandlerFactory;
+        if (InMemoryEnabled) {
+            STORAGE_INFO("NBD: Starting endpoint with IN-MEMORY mode for disk="
+                << request.GetDiskId() << " client=" << request.GetClientId());
+            deviceHandlerFactory = CreateInMemoryDeviceHandlerFactory(Logging);
+        } else {
+            deviceHandlerFactory = CreateDefaultDeviceHandlerFactory();
+        }
+
         auto requestFactory = CreateServerHandlerFactory(
-            CreateDefaultDeviceHandlerFactory(),
+            std::move(deviceHandlerFactory),
             Logging,
             std::move(session),
             ServerStats,
@@ -128,7 +146,8 @@ IEndpointListenerPtr CreateNbdEndpointListener(
     IServerStatsPtr serverStats,
     NProto::TChecksumFlags checksumFlags,
     ui32 maxZeroBlocksSubRequestSize,
-    const IErrorHandlerMapPtr errorHandlerMap)
+    const IErrorHandlerMapPtr errorHandlerMap,
+    bool inMemoryEnabled)
 {
     return std::make_shared<TNbdEndpointListener>(
         std::move(server),
@@ -136,7 +155,8 @@ IEndpointListenerPtr CreateNbdEndpointListener(
         std::move(serverStats),
         std::move(checksumFlags),
         maxZeroBlocksSubRequestSize,
-        std::move(errorHandlerMap));
+        std::move(errorHandlerMap),
+        inMemoryEnabled);
 }
 
 }   // namespace NCloud::NBlockStore::NServer

@@ -95,6 +95,7 @@ public:
     ui64 GetMaxInFlightBytesPerThread() const;
     TAffinity GetVhostAffinity() const;
     TAffinity GetNbdAffinity() const;
+    bool GetNbdInMemoryEnabled() const;
     ui32 GetNodeRegistrationMaxAttempts() const;
     TDuration GetNodeRegistrationTimeout() const;
     TDuration GetNodeRegistrationErrorTimeout() const;

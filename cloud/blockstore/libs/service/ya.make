@@ -8,6 +8,7 @@ SRCS(
     checksum_storage_wrapper.cpp
     context.cpp
     device_handler.cpp
+    device_handler_inmemory.cpp
     request_helpers.cpp
     request.cpp
     service_auth.cpp

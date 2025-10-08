@@ -135,6 +135,7 @@ message TServerConfig
     optional bool NbdLimiterEnabled = 61;
     optional uint64 MaxInFlightBytesPerThread = 36;
     optional TAffinity NbdAffinity = 38;
+    optional bool NbdInMemoryEnabled = 127;
 
     // Dynamic node registration params.
     // The following 3 are deprecated in favor of params in storage config

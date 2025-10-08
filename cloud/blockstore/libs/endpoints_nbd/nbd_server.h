@@ -17,6 +17,7 @@ IEndpointListenerPtr CreateNbdEndpointListener(
     IServerStatsPtr serverStats,
     NProto::TChecksumFlags checksumFlags,
     ui32 maxZeroBlocksSubRequestSize,
-    const NBD::IErrorHandlerMapPtr errorHandlerMap);
+    const NBD::IErrorHandlerMapPtr errorHandlerMap,
+    bool inMemoryEnabled = false);
 
 }   // namespace NCloud::NBlockStore::NServer
