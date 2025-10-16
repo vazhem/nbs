@@ -246,6 +246,7 @@ NCloud::NProto::TError TPingWorkerStorage::SendPingToDDisk(
     // Create DDisk ping request
     auto request = std::make_unique<TEvBlobStorage::TEvDDiskPing>();
 
+    PendingRequests[requestId].Span.Event("Send_TEvDDiskPing");
     // Send with TraceId for request tracing
     ctx.Send(new IEventHandle(ddiskActorId, ctx.SelfID, request.release(), 0,
         requestId, nullptr, std::move(traceId)));
@@ -272,6 +273,8 @@ void TPingWorkerStorage::HandleDDiskPingResponse(
 
     // Get reference before erasing - we'll move data out of it
     auto& requestCtx = it->second;
+
+    requestCtx.Span.Event("Received_TEvDDiskPingResponse");
 
     if (record.GetStatus() == NKikimrProto::OK) {
         if (requestCtx.IsRead) {

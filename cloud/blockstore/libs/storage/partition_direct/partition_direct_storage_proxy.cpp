@@ -22,6 +22,8 @@ using namespace NKikimr;
 
 ////////////////////////////////////////////////////////////////////////////////
 
+
+
 NCloud::NProto::TError TProxyStorage::ReadBlocksLocal(
     const TActorContext& ctx,
     TRequestInfoPtr requestInfo,
@@ -658,8 +660,8 @@ NCloud::NProto::TError TProxyStorage::SendReadToDDisks(
 
         auto request = std::make_unique<TEvBlobStorage::TEvDDiskReadRequest>();
 
-        request->Record.SetOffset(chunkRelativeOffset);  // Chunk-relative offset
-        request->Record.SetSize(size);
+    request->Record.SetOffset(chunkRelativeOffset);  // Chunk-relative offset
+    request->Record.SetSize(size);
     request->Record.SetChunkId(chunkId);
 
     // Log the exact read request being sent to DDisk
@@ -688,6 +690,8 @@ NCloud::NProto::TError TProxyStorage::SendReadToDDisks(
 
     // Store child span in context (key is requestId which includes segment index in high bits)
     requestCtx.ChildSpans[requestId] = std::move(childSpan);
+
+    requestCtx.ChildSpans[requestId].Event("Send_TEvDDiskReadRequest");
 
     // Send with child span's TraceId for request tracing
     ctx.Send(new IEventHandle(targetActorId, ctx.SelfID, request.release(), 0, requestId, nullptr, std::move(childTraceId)));
@@ -833,6 +837,8 @@ NCloud::NProto::TError TProxyStorage::SendWriteToDDisks(
     // Store child span in context (key is requestId which includes segment index in high bits)
     requestCtx.ChildSpans[requestId] = std::move(childSpan);
 
+    requestCtx.ChildSpans[requestId].Event("Send_TEvDDiskWriteRequest");
+
     // Send with child span's TraceId for request tracing
     ctx.Send(new IEventHandle(targetActorId, ctx.SelfID, request.release(), 0, requestId, nullptr, std::move(childTraceId)));
 
@@ -891,6 +897,8 @@ void TProxyStorage::HandleDDiskReadResponse(
     // End child span for this DDisk subrequest
     auto childSpanIt = requestCtx.ChildSpans.find(responseRequestId);
     if (childSpanIt != requestCtx.ChildSpans.end()) {
+        childSpanIt->second.Event("Received_TEvDDiskReadResponse");
+
         if (NCloud::HasError(error)) {
             childSpanIt->second.EndError(msg->Record.GetErrorReason());
         } else {
@@ -1154,6 +1162,7 @@ void TProxyStorage::HandleDDiskWriteResponse(
     // End child span for this DDisk subrequest
     auto childSpanIt = requestCtx.ChildSpans.find(responseRequestId);
     if (childSpanIt != requestCtx.ChildSpans.end()) {
+        childSpanIt->second.Event("Received_TEvDDiskWriteResponse");
         if (NCloud::HasError(error)) {
             childSpanIt->second.EndError(msg->Record.GetErrorReason());
         } else {

@@ -246,6 +246,8 @@ NCloud::NProto::TError TWorkerStorage::SendReadToDDisks(
     request->Record.SetOffset(chunkRelativeOffset);
     request->Record.SetSize(size);
 
+    PendingRequests[requestId].Span.Event("Send_TEvDDiskReadRequest");
+
     // Send with TraceId for request tracing
     ctx.Send(new IEventHandle(ddiskActorId, ctx.SelfID, request.release(), 0,
         requestId, nullptr, std::move(traceId)));
@@ -316,13 +318,15 @@ NCloud::NProto::TError TWorkerStorage::SendWriteToDDisks(
     auto request = std::make_unique<TEvBlobStorage::TEvDDiskWriteRequest>();
     request->Record.SetChunkId(chunkId);
     request->Record.SetOffset(chunkRelativeOffset);
-    request->Record.SetSize(size);  // CRITICAL FIX: Set size explicitly
+    request->Record.SetSize(size);
     request->Record.SetData(data);
 
     LOG_DEBUG_S(ctx, TBlockStoreComponents::PARTITION_WORKER,
         "SendWriteToDDisks: FIXED DDisk request chunkId=" << chunkId
         << " offset=" << chunkRelativeOffset << " size=" << size
         << " dataSize=" << data.size());
+
+    PendingRequests[requestId].Span.Event("Send_TEvDDiskWriteRequest");
 
     // Send with TraceId for request tracing
     ctx.Send(new IEventHandle(ddiskActorId, ctx.SelfID, request.release(), 0,
@@ -349,6 +353,8 @@ void TWorkerStorage::HandleDDiskReadResponse(
     }
 
     auto& requestCtx = it->second;
+
+    requestCtx.Span.Event("Received_TEvDDiskReadResponse");
 
     if (record.GetStatus() == NKikimrProto::OK) {
         // Copy data to read buffer
@@ -404,6 +410,8 @@ void TWorkerStorage::HandleDDiskWriteResponse(
     }
 
     auto& requestCtx = it->second;
+
+    requestCtx.Span.Event("Received_TEvDDiskWriteResponse");
 
     if (record.GetStatus() == NKikimrProto::OK) {
         // End Wilson span successfully
